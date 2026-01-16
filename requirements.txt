@@ -1,0 +1,47 @@
+# Audio-to-Sheet-Music Transcription System
+# Core Dependencies
+
+# Audio Processing (MVP-essential)
+librosa>=0.10.0
+soundfile>=0.12.0
+pydub>=0.25.0
+
+# Scientific Computing (MVP-essential)
+numpy>=1.24.0
+scipy>=1.11.0
+
+# MIDI & Music (MVP-essential: MIDI only)
+pretty_midi>=0.2.10
+mido>=1.3.0
+
+# CLI / UX (MVP-essential)
+typer>=0.9.0
+rich>=13.0.0
+
+# Development (useful but optional; keep installed if you run tests / formatters)
+pytest>=7.4.0
+black>=23.0.0
+ruff>=0.1.0
+
+###############################################
+# Heavier / later-phase dependencies (commented)
+# Uncomment as you implement later phases.
+###############################################
+
+# Deep Learning for polyphonic / multi-instrument (Phase 2+)
+# torch>=2.0.0
+# torchaudio>=2.0.0
+
+# Pitch Detection (CREPE) – requires TensorFlow (heavy)
+# tensorflow>=2.13.0  # Required for CREPE
+# crepe>=0.0.13
+
+# MusicXML / score manipulation (Phase 4: sheet rendering)
+# music21>=9.1.0
+
+# Evaluation / research metrics
+# mir_eval>=0.7
+
+# Optional: GPU acceleration
+# Install PyTorch with CUDA separately if needed:
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118
