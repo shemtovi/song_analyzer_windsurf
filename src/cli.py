@@ -33,10 +33,12 @@ def transcribe(
     ),
 ):
     """Transcribe audio file to MIDI."""
-    from .audio_loader import AudioLoader
-    from .transcriber import MonophonicTranscriber, PolyphonicTranscriber
-    from .postprocess import PostProcessor, TempoDetector, KeyDetector
-    from .exporter import MIDIExporter
+    from .input import AudioLoader
+    from .transcription import MonophonicTranscriber, PolyphonicTranscriber
+    from .analysis import TempoAnalyzer
+    from .inference import KeyDetector
+    from .processing import Quantizer, NoteCleanup
+    from .output import MIDIExporter
 
     # Validate input
     if not input_file.exists():
@@ -60,8 +62,8 @@ def transcribe(
     # Detect tempo if not provided
     if tempo <= 0:
         console.print("[blue]Detecting tempo...[/blue]")
-        tempo_detector = TempoDetector()
-        detected_tempo, beats = tempo_detector.detect(audio, sr)
+        tempo_analyzer = TempoAnalyzer()
+        detected_tempo, beats = tempo_analyzer.detect(audio, sr)
 
         # Some signals (e.g., a single sustained sine tone) may not
         # produce reliable beat tracking and can return tempo == 0.
@@ -94,9 +96,10 @@ def transcribe(
     # Post-process
     if quantize:
         console.print("[blue]Quantizing...[/blue]")
-        processor = PostProcessor(tempo=tempo)
-        notes = processor.quantize(notes)
-        notes = processor.cleanup(notes)
+        quantizer = Quantizer(tempo=tempo)
+        cleaner = NoteCleanup()
+        notes = quantizer.quantize(notes)
+        notes = cleaner.cleanup(notes)
         console.print(f"  After cleanup: {len(notes)} notes")
 
     # Detect key
@@ -114,7 +117,7 @@ def transcribe(
 
     # Show note summary
     if verbose and notes:
-        _show_notes_table(notes[:10])
+        _show_notes_table(notes)
 
 
 @app.command()
@@ -122,8 +125,9 @@ def info(
     input_file: Path = typer.Argument(..., help="Input audio file"),
 ):
     """Show information about an audio file."""
-    from .audio_loader import AudioLoader
-    from .postprocess import TempoDetector, KeyDetector
+    from .input import AudioLoader
+    from .analysis import TempoAnalyzer
+    from .inference import KeyDetector
 
     if not input_file.exists():
         console.print(f"[red]Error: File not found: {input_file}[/red]")
@@ -138,8 +142,8 @@ def info(
     console.print(f"  Samples: {len(audio):,}")
 
     # Detect tempo
-    tempo_detector = TempoDetector()
-    tempo, _ = tempo_detector.detect(audio, sr)
+    tempo_analyzer = TempoAnalyzer()
+    tempo, _ = tempo_analyzer.detect(audio, sr)
     console.print(f"  Estimated tempo: {tempo:.1f} BPM")
 
     # Detect key
@@ -150,7 +154,7 @@ def info(
 
 def _show_notes_table(notes):
     """Display notes in a table."""
-    table = Table(title="Detected Notes (first 10)")
+    table = Table(title="Detected Notes")
     table.add_column("Pitch", style="cyan")
     table.add_column("Onset (s)", style="green")
     table.add_column("Duration (s)", style="yellow")
