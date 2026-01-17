@@ -3,13 +3,14 @@
 Architecture Layers:
     1. input/       - Audio loading and preprocessing
     2. analysis/    - Low-level signal analysis (features, tempo, pitch)
-    3. transcription/ - Note-level detection (mono/poly)
-    4. inference/   - Musical understanding (key, chords, melody, harmony, structure)
-    5. processing/  - Note post-processing (quantize, cleanup)
-    6. output/      - Export (MIDI, MusicXML, sheet)
+    3. transcription/ - Note-level detection (mono/poly/multi-instrument)
+    4. separation/  - Source separation for multi-instrument (Demucs)
+    5. inference/   - Musical understanding (key, chords, melody, harmony, structure)
+    6. processing/  - Note post-processing (quantize, cleanup)
+    7. output/      - Export (MIDI, MusicXML, sheet)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Core types
 from .core import Note
@@ -21,7 +22,18 @@ from .input import AudioLoader
 from .analysis import FeatureExtractor, TempoAnalyzer, PitchAnalyzer
 
 # Transcription layer
-from .transcription import MonophonicTranscriber, PolyphonicTranscriber
+from .transcription import (
+    MonophonicTranscriber,
+    PolyphonicTranscriber,
+    MultiInstrumentTranscriber,
+)
+
+# Separation layer (Phase 3)
+from .separation import (
+    SourceSeparator,
+    StemType,
+    InstrumentClassifier,
+)
 
 # Inference layer
 from .inference import (
@@ -50,6 +62,11 @@ __all__ = [
     # Transcription
     "MonophonicTranscriber",
     "PolyphonicTranscriber",
+    "MultiInstrumentTranscriber",
+    # Separation
+    "SourceSeparator",
+    "StemType",
+    "InstrumentClassifier",
     # Inference
     "KeyDetector",
     "ChordAnalyzer",

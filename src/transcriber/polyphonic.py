@@ -54,11 +54,24 @@ class PolyphonicTranscriber(Transcriber):
         """Initialize the neural transcriptor lazily."""
         if self._transcriptor is None and self._use_neural:
             try:
-                from piano_transcription_inference import PianoTranscription
-                self._transcriptor = PianoTranscription(device=self.device)
+                import warnings
+                import os
+                import sys
+                
+                # Suppress stdout/stderr during model loading (wget warnings, etc.)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    # Redirect stderr to suppress wget errors on Windows
+                    old_stderr = sys.stderr
+                    sys.stderr = open(os.devnull, 'w')
+                    try:
+                        from piano_transcription_inference import PianoTranscription
+                        self._transcriptor = PianoTranscription(device=self.device)
+                    finally:
+                        sys.stderr.close()
+                        sys.stderr = old_stderr
             except Exception as e:
-                print(f"  [Warning] Failed to load neural model: {e}")
-                print("  [Warning] Falling back to CQT-based transcription")
+                # Silently fall back to CQT
                 self._use_neural = False
 
     def transcribe(self, audio: np.ndarray, sr: int) -> List[Note]:
