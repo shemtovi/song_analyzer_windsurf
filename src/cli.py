@@ -1,18 +1,72 @@
-"""Command-line interface for Song Analyzer."""
+"""Command-line interface for Song Analyzer.
+
+Provides commands for:
+- transcribe: Convert audio to MIDI
+- analyze: Full harmony analysis (key, chords, harmony)
+- separate: Multi-instrument transcription with source separation
+- info: Show audio file information
+"""
 
 import typer
 import tempfile
 import shutil
+import time
+import json
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 app = typer.Typer(
     name="song-analyzer",
     help="Audio to Sheet Music Transcription System",
+    rich_markup_mode="markdown",
 )
 console = Console()
+
+
+@dataclass
+class StageTimings:
+    """Track timing of processing stages."""
+
+    stages: Dict[str, float] = field(default_factory=dict)
+    _current_stage: Optional[str] = field(default=None, repr=False)
+    _start_time: float = field(default=0.0, repr=False)
+
+    def start(self, stage: str) -> None:
+        """Start timing a stage."""
+        self._current_stage = stage
+        self._start_time = time.time()
+
+    def stop(self) -> float:
+        """Stop timing the current stage, return duration."""
+        if self._current_stage is None:
+            return 0.0
+        duration = time.time() - self._start_time
+        self.stages[self._current_stage] = duration
+        self._current_stage = None
+        return duration
+
+    @property
+    def total_time(self) -> float:
+        """Get total time across all stages."""
+        return sum(self.stages.values())
+
+    def print_summary(self) -> None:
+        """Print timing summary to console."""
+        console.print("\n[bold]Timing Summary:[/bold]")
+        for stage, duration in self.stages.items():
+            console.print(f"  {stage}: {duration:.2f}s")
+        console.print(f"  [bold]Total: {self.total_time:.2f}s[/bold]")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON output."""
+        return {
+            "stages": self.stages,
+            "total_time": self.total_time,
+        }
 
 
 def download_audio_from_url(url: str, output_dir: Optional[Path] = None) -> Path:
@@ -136,13 +190,37 @@ def transcribe(
     polyphonic: bool = typer.Option(
         False, "-p", "--polyphonic", help="Use polyphonic transcription (for chords/multiple notes)"
     ),
+    aggressive_cleanup: bool = typer.Option(
+        False, "--aggressive", "-a", help="Use aggressive cleanup (remove harmonics, outliers, duplicates)"
+    ),
+    min_velocity: int = typer.Option(
+        20, "--min-velocity", help="Minimum note velocity (0-127)"
+    ),
+    min_duration: float = typer.Option(
+        0.05, "--min-duration", help="Minimum note duration in seconds"
+    ),
+    max_notes_per_frame: int = typer.Option(
+        0, "--max-notes", help="Maximum simultaneous notes (0 = unlimited)"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Output results as JSON (for scripting)"
+    ),
 ):
-    """Transcribe audio file to MIDI."""
+    """Transcribe audio file to MIDI.
+
+    **Examples:**
+
+        song-analyzer transcribe song.wav
+
+        song-analyzer transcribe song.mp3 -o output.mid -p
+
+        song-analyzer transcribe song.wav --aggressive --max-notes 8
+    """
     from .input import AudioLoader
     from .transcription import MonophonicTranscriber, PolyphonicTranscriber
     from .analysis import TempoAnalyzer
     from .inference import KeyDetector
-    from .processing import Quantizer, NoteCleanup
+    from .processing import Quantizer, NoteCleanup, CleanupConfig
     from .output import MIDIExporter
 
     # Validate input
@@ -202,26 +280,71 @@ def transcribe(
     if quantize:
         console.print("[blue]Quantizing...[/blue]")
         quantizer = Quantizer(tempo=tempo)
-        cleaner = NoteCleanup()
         notes = quantizer.quantize(notes)
+
+    # Cleanup
+    console.print("[blue]Cleaning up notes...[/blue]")
+    cleanup_config = CleanupConfig(
+        min_velocity=min_velocity,
+        min_duration=min_duration,
+        enable_all=aggressive_cleanup,
+    )
+    cleaner = NoteCleanup(config=cleanup_config)
+
+    if aggressive_cleanup:
+        notes, stats = cleaner.cleanup_aggressive(notes, return_stats=True)
+        console.print(f"  Removed: {stats.removed_ghost_notes} ghost, {stats.removed_harmonics} harmonics, {stats.removed_duplicates} duplicates, {stats.removed_outliers} outliers")
+    else:
         notes = cleaner.cleanup(notes)
-        console.print(f"  After cleanup: {len(notes)} notes")
+
+    # Limit notes per frame if requested
+    if max_notes_per_frame > 0:
+        before_count = len(notes)
+        notes = cleaner.limit_notes_per_frame(notes, max_notes=max_notes_per_frame)
+        console.print(f"  Limited to {max_notes_per_frame} notes/frame: {before_count} -> {len(notes)}")
+
+    console.print(f"  After cleanup: {len(notes)} notes")
 
     # Detect key
-    if verbose:
+    key_info_dict = None
+    if verbose or json_output:
         key_detector = KeyDetector()
         key, mode, confidence = key_detector.detect_from_notes(notes)
-        console.print(f"  Detected key: {key} {mode} (confidence: {confidence:.2f})")
+        key_info_dict = {"key": key, "mode": mode, "confidence": confidence}
+        if not json_output:
+            console.print(f"  Detected key: {key} {mode} (confidence: {confidence:.2f})")
 
     # Export
-    console.print(f"[blue]Exporting to:[/blue] {output}")
+    if not json_output:
+        console.print(f"[blue]Exporting to:[/blue] {output}")
     exporter = MIDIExporter(tempo=tempo)
     exporter.export(notes, str(output))
 
-    console.print(f"[green]✓ Transcription complete![/green]")
+    if not json_output:
+        console.print(f"[green]Transcription complete![/green]")
 
-    # Show note summary
-    if verbose and notes:
+    # JSON output mode
+    if json_output:
+        result = {
+            "input": str(input_file),
+            "output": str(output),
+            "notes_count": len(notes),
+            "tempo": tempo,
+            "duration": duration,
+            "polyphonic": polyphonic,
+        }
+        if key_info_dict:
+            result["key"] = key_info_dict
+        if aggressive_cleanup:
+            result["cleanup_stats"] = {
+                "ghost_notes_removed": stats.removed_ghost_notes,
+                "harmonics_removed": stats.removed_harmonics,
+                "duplicates_removed": stats.removed_duplicates,
+                "outliers_removed": stats.removed_outliers,
+            }
+        console.print_json(data=result)
+    elif verbose and notes:
+        # Show note summary
         _show_notes_table(notes)
 
 
@@ -375,12 +498,15 @@ def separate(
     keep_download: bool = typer.Option(
         False, "--keep", "-k", help="Keep downloaded audio file"
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Disable caching of separated stems"
+    ),
     verbose: bool = typer.Option(
         False, "-v", "--verbose", help="Verbose output"
     ),
 ):
     """Multi-instrument transcription using source separation.
-    
+
     Separates audio into stems using Demucs:
     - htdemucs: 4 stems (drums, bass, vocals, other)
     - htdemucs_6s: 6 stems (drums, bass, vocals, guitar, piano, other)
@@ -453,7 +579,13 @@ def separate(
             demucs_model=model,
             device="auto",
             skip_drums=skip_drums,
+            enable_cache=not no_cache,
         )
+
+        if verbose and not no_cache:
+            cache_stats = transcriber.separator.get_cache_stats()
+            if cache_stats["cache_entries"] > 0:
+                console.print(f"   Cache: {cache_stats['cache_entries']} entries, {cache_stats['total_size_mb']:.1f}MB")
         
         if not transcriber.is_available:
             console.print("   [yellow]Demucs not available, using fallback separation[/yellow]")
