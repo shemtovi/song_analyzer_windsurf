@@ -144,17 +144,19 @@ class MultiInstrumentTranscriber(Transcriber):
         device: str = "auto",
         skip_drums: bool = False,
         min_stem_energy: float = 0.001,
+        enable_cache: bool = True,
         mono_transcriber_kwargs: Optional[Dict] = None,
         poly_transcriber_kwargs: Optional[Dict] = None,
     ):
         """
         Initialize MultiInstrumentTranscriber.
-        
+
         Args:
             demucs_model: Demucs model to use for separation
             device: Device for inference ('auto', 'cpu', 'cuda')
             skip_drums: Skip drum transcription (drums don't have pitched notes)
             min_stem_energy: Minimum RMS energy to process a stem
+            enable_cache: Enable caching of separated stems (default: True)
             mono_transcriber_kwargs: Kwargs for monophonic transcriber
             poly_transcriber_kwargs: Kwargs for polyphonic transcriber
         """
@@ -162,11 +164,13 @@ class MultiInstrumentTranscriber(Transcriber):
         self.device = device
         self.skip_drums = skip_drums
         self.min_stem_energy = min_stem_energy
-        
+        self.enable_cache = enable_cache
+
         # Initialize components
         self.separator = SourceSeparator(
             model_name=demucs_model,
             device=device,
+            enable_cache=enable_cache,
         )
         self.classifier = InstrumentClassifier()
         
