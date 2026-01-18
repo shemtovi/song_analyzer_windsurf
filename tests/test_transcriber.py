@@ -47,7 +47,7 @@ class TestAudioLoader:
     """Tests for AudioLoader."""
 
     def test_normalize(self):
-        from src.audio_loader import AudioLoader
+        from src.input.loader import AudioLoader
 
         loader = AudioLoader()
         audio = np.array([0.5, -0.5, 0.25, -0.25])
@@ -56,7 +56,7 @@ class TestAudioLoader:
         assert np.abs(normalized).max() == 1.0
 
     def test_unsupported_format(self, tmp_path):
-        from src.audio_loader import AudioLoader
+        from src.input.loader import AudioLoader
 
         # Create a dummy file with unsupported extension
         dummy_file = tmp_path / "test.xyz"
@@ -68,30 +68,30 @@ class TestAudioLoader:
 
 
 class TestPostProcessor:
-    """Tests for PostProcessor."""
+    """Tests for Quantizer and NoteCleanup."""
 
     def test_quantize(self):
-        from src.postprocess import PostProcessor
+        from src.processing.quantize import Quantizer
 
-        processor = PostProcessor(tempo=120.0, quantize_resolution=16)
+        quantizer = Quantizer(tempo=120.0, quantize_resolution=16)
 
         notes = [Note(pitch=60, onset=0.48, offset=0.98)]
-        quantized = processor.quantize(notes)
+        quantized = quantizer.quantize(notes)
 
         # At 120 BPM, 16th note = 0.125s
         # 0.48 should snap to 0.5
         assert quantized[0].onset == 0.5
 
     def test_remove_ghost_notes(self):
-        from src.postprocess import PostProcessor
+        from src.processing.cleanup import NoteCleanup
 
-        processor = PostProcessor()
+        cleanup = NoteCleanup(min_velocity=20)
         notes = [
             Note(pitch=60, onset=0, offset=1, velocity=80),
             Note(pitch=62, onset=1, offset=2, velocity=10),  # Ghost
         ]
 
-        cleaned = processor.remove_ghost_notes(notes, min_velocity=20)
+        cleaned = cleanup.remove_ghost_notes(notes)
         assert len(cleaned) == 1
         assert cleaned[0].pitch == 60
 
@@ -101,7 +101,7 @@ class TestIntegration:
 
     @pytest.fixture
     def audio_loader(self):
-        from src.audio_loader import AudioLoader
+        from src.input.loader import AudioLoader
         return AudioLoader(target_sr=22050)
 
     def test_load_single_a4(self, audio_loader):
@@ -148,7 +148,7 @@ class TestIntegration:
 
     def test_feature_extraction(self, audio_loader):
         """Test feature extraction on sample audio."""
-        from src.features import FeatureExtractor
+        from src.analysis.features import FeatureExtractor
 
         audio_path = EXAMPLES_DIR / "test_c4.wav"
         if not audio_path.exists():
@@ -168,23 +168,23 @@ class TestIntegration:
 
     def test_tempo_detection(self, audio_loader):
         """Test tempo detection."""
-        from src.postprocess import TempoDetector
+        from src.analysis.tempo import TempoAnalyzer
 
         audio_path = EXAMPLES_DIR / "c_major_scale.wav"
         if not audio_path.exists():
             pytest.skip("Test audio not generated")
 
         audio, sr = audio_loader.load(str(audio_path))
-        detector = TempoDetector()
+        analyzer = TempoAnalyzer()
 
-        tempo, beats = detector.detect(audio, sr)
+        tempo, beats = analyzer.detect(audio, sr)
         # Tempo should be a positive number (simple sine waves may not have clear beats)
         # Just verify it returns something valid
         assert tempo >= 0
 
     def test_midi_export(self, audio_loader, tmp_path):
         """Test MIDI export functionality."""
-        from src.exporter import MIDIExporter
+        from src.output.midi import MIDIExporter
 
         notes = [
             Note(pitch=60, onset=0.0, offset=0.5, velocity=80),
@@ -205,7 +205,7 @@ class TestPolyphonicTranscriber:
 
     @pytest.fixture
     def audio_loader(self):
-        from src.audio_loader import AudioLoader
+        from src.input.loader import AudioLoader
         return AudioLoader(target_sr=22050)
 
     def test_polyphonic_transcriber_creation(self):
