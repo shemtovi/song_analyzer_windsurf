@@ -1,0 +1,80 @@
+{
+  "name": "baseline_measurements",
+  "timestamp": "2024-01-15T00:00:00",
+  "stages": [
+    {
+      "stage": "monophonic_transcription",
+      "duration_seconds": 2.0,
+      "input_duration_seconds": 10.0,
+      "notes_detected": 20,
+      "peak_memory_mb": 100.0
+    },
+    {
+      "stage": "polyphonic_transcription",
+      "duration_seconds": 5.0,
+      "input_duration_seconds": 10.0,
+      "notes_detected": 50,
+      "peak_memory_mb": 400.0
+    },
+    {
+      "stage": "transcribe",
+      "duration_seconds": 15.0,
+      "input_duration_seconds": 30.0,
+      "notes_detected": 100,
+      "peak_memory_mb": 500.0
+    },
+    {
+      "stage": "key_detection",
+      "duration_seconds": 0.1,
+      "input_duration_seconds": 30.0,
+      "notes_detected": 0,
+      "peak_memory_mb": 10.0
+    },
+    {
+      "stage": "quantize",
+      "duration_seconds": 0.05,
+      "input_duration_seconds": 30.0,
+      "notes_detected": 100,
+      "peak_memory_mb": 5.0
+    },
+    {
+      "stage": "cleanup",
+      "duration_seconds": 0.02,
+      "input_duration_seconds": 30.0,
+      "notes_detected": 90,
+      "peak_memory_mb": 2.0
+    },
+    {
+      "stage": "midi_export",
+      "duration_seconds": 0.1,
+      "input_duration_seconds": 30.0,
+      "notes_detected": 0,
+      "peak_memory_mb": 5.0
+    },
+    {
+      "stage": "mel_spectrogram",
+      "duration_seconds": 0.5,
+      "input_duration_seconds": 10.0,
+      "notes_detected": 0,
+      "peak_memory_mb": 50.0
+    },
+    {
+      "stage": "cqt",
+      "duration_seconds": 1.0,
+      "input_duration_seconds": 10.0,
+      "notes_detected": 0,
+      "peak_memory_mb": 100.0
+    },
+    {
+      "stage": "chromagram",
+      "duration_seconds": 0.3,
+      "input_duration_seconds": 10.0,
+      "notes_detected": 0,
+      "peak_memory_mb": 20.0
+    }
+  ],
+  "system_info": {
+    "platform": "baseline",
+    "notes": "Initial baseline measurements - update with actual measurements on your system"
+  }
+}

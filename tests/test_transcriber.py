@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.transcriber.base import Note
+from src.core import Note
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 
@@ -127,7 +127,7 @@ class TestIntegration:
 
     def test_transcribe_single_note(self, audio_loader):
         """Test transcribing a single A4 note."""
-        from src.transcriber import MonophonicTranscriber
+        from src.transcription import MonophonicTranscriber
 
         audio_path = EXAMPLES_DIR / "single_a4.wav"
         if not audio_path.exists():
@@ -210,7 +210,7 @@ class TestPolyphonicTranscriber:
 
     def test_polyphonic_transcriber_creation(self):
         """Test PolyphonicTranscriber can be instantiated."""
-        from src.transcriber import PolyphonicTranscriber
+        from src.transcription import PolyphonicTranscriber
         
         transcriber = PolyphonicTranscriber()
         assert transcriber is not None
@@ -219,7 +219,7 @@ class TestPolyphonicTranscriber:
 
     def test_transcribe_chords_detects_multiple_notes(self, audio_loader):
         """Test that polyphonic transcriber detects multiple simultaneous notes."""
-        from src.transcriber import PolyphonicTranscriber
+        from src.transcription import PolyphonicTranscriber
         
         audio_path = EXAMPLES_DIR / "chords_g_f_a.wav"
         if not audio_path.exists():
@@ -238,7 +238,7 @@ class TestPolyphonicTranscriber:
 
     def test_transcribe_chords_correct_pitches(self, audio_loader):
         """Test that polyphonic transcriber detects approximately correct pitches."""
-        from src.transcriber import PolyphonicTranscriber
+        from src.transcription import PolyphonicTranscriber
         
         audio_path = EXAMPLES_DIR / "chords_g_f_a.wav"
         if not audio_path.exists():
@@ -268,7 +268,7 @@ class TestPolyphonicTranscriber:
 
     def test_transcribe_chords_with_melody(self, audio_loader):
         """Test polyphonic transcriber on chords + melody."""
-        from src.transcriber import PolyphonicTranscriber
+        from src.transcription import PolyphonicTranscriber
         
         audio_path = EXAMPLES_DIR / "chords_g_f_a_with_melody.wav"
         if not audio_path.exists():
@@ -283,7 +283,7 @@ class TestPolyphonicTranscriber:
 
     def test_polyphonic_vs_monophonic_note_count(self, audio_loader):
         """Test that polyphonic detects more notes than monophonic on chord audio."""
-        from src.transcriber import MonophonicTranscriber, PolyphonicTranscriber
+        from src.transcription import MonophonicTranscriber, PolyphonicTranscriber
         
         audio_path = EXAMPLES_DIR / "chords_g_f_a.wav"
         if not audio_path.exists():
