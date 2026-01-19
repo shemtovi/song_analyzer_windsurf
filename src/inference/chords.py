@@ -260,26 +260,35 @@ class ChordAnalyzer:
     def __init__(
         self,
         min_chord_duration: float = 0.25,
-        min_notes_for_chord: int = 2,
+        min_notes_for_chord: int = 3,
         tolerance_semitones: int = 0,
         use_key_context: bool = True,
         key_context_weight: float = 0.2,
+        min_chord_confidence: float = 0.4,
+        min_note_velocity: int = 30,
+        extra_note_penalty: float = 0.1,
     ):
         """
         Initialize ChordAnalyzer.
 
         Args:
             min_chord_duration: Minimum duration for a chord segment (seconds)
-            min_notes_for_chord: Minimum simultaneous notes to form a chord
+            min_notes_for_chord: Minimum simultaneous notes to form a chord (default: 3 for triads)
             tolerance_semitones: Allow pitch mismatches within this range
             use_key_context: Whether to use key context for chord scoring
             key_context_weight: How much to weight key context (0-1)
+            min_chord_confidence: Minimum confidence to accept a chord (0-1)
+            min_note_velocity: Minimum note velocity to include in chord analysis
+            extra_note_penalty: Penalty per extra note not in template (higher = stricter)
         """
         self.min_chord_duration = min_chord_duration
         self.min_notes_for_chord = min_notes_for_chord
         self.tolerance_semitones = tolerance_semitones
         self.use_key_context = use_key_context
         self.key_context_weight = key_context_weight
+        self.min_chord_confidence = min_chord_confidence
+        self.min_note_velocity = min_note_velocity
+        self.extra_note_penalty = extra_note_penalty
 
     def detect_chords(
         self,
@@ -295,7 +304,7 @@ class ChordAnalyzer:
             notes: List of Note objects
             key_root: Optional key root for context (e.g., "C")
             key_mode: Optional key mode for context ("major" or "minor")
-            segment_by: How to segment chords - "onset" (by note onsets) or 
+            segment_by: How to segment chords - "onset" (by note onsets) or
                        "fixed" (fixed time windows)
 
         Returns:
@@ -303,12 +312,18 @@ class ChordAnalyzer:
         """
         if not notes or len(notes) < self.min_notes_for_chord:
             return []
-        
+
+        # Filter out low-velocity notes (likely noise or ghost notes)
+        filtered_notes = [n for n in notes if n.velocity >= self.min_note_velocity]
+
+        if len(filtered_notes) < self.min_notes_for_chord:
+            return []
+
         # Segment notes into chord regions
         if segment_by == "onset":
-            segments = self._segment_by_onset(notes)
+            segments = self._segment_by_onset(filtered_notes)
         else:
-            segments = self._segment_by_time(notes)
+            segments = self._segment_by_time(filtered_notes)
         
         chords = []
         prev_chord = None
@@ -423,28 +438,36 @@ class ChordAnalyzer:
         """
         Detect a single chord from simultaneous notes.
         """
+        # Filter by velocity again for this segment
+        valid_notes = [n for n in notes if n.velocity >= self.min_note_velocity]
+
         # Get pitch classes present
-        pitch_classes = self.notes_to_pitch_classes(notes)
-        
+        pitch_classes = self.notes_to_pitch_classes(valid_notes)
+
         if len(pitch_classes) < self.min_notes_for_chord:
             return None
-        
+
         # Find bass note (lowest pitch)
-        bass_pitch = min(n.pitch for n in notes)
+        bass_pitch = min(n.pitch for n in valid_notes)
         bass_pc = bass_pitch % 12
         bass_name = PITCH_NAMES[bass_pc]
-        
+
         # Try all possible roots and chord types
         candidates = self._get_chord_candidates(
             pitch_classes, key_root, key_mode, bass_pc, prev_chord
         )
-        
+
         if not candidates:
             return None
-        
+
         # Select best candidate
         best = max(candidates, key=lambda c: c.score)
-        
+
+        # Check confidence threshold - reject low-confidence detections
+        confidence = min(1.0, best.score)
+        if confidence < self.min_chord_confidence:
+            return None
+
         # Determine inversion
         inversion = 0
         if best.root != bass_name:
@@ -454,15 +477,15 @@ class ChordAnalyzer:
                 inversion = 1
             elif bass_pc == (root_pc + template[2]) % 12 if len(template) > 2 else False:
                 inversion = 2
-        
+
         return Chord(
             root=best.root,
             quality=best.quality,
             onset=onset,
             offset=offset,
             bass=bass_name if bass_name != best.root else None,
-            notes=[n.pitch for n in notes],
-            confidence=min(1.0, best.score),
+            notes=[n.pitch for n in valid_notes],
+            confidence=confidence,
             inversion=inversion,
         )
     
@@ -553,8 +576,9 @@ class ChordAnalyzer:
             else:
                 missing_penalty += 0.1
         
-        # Small penalty for extra notes (could be extensions or passing tones)
-        extra_penalty = len(extra) * 0.05
+        # Penalty for extra notes (could be extensions or passing tones)
+        # Use configurable penalty (default 0.1, was 0.05)
+        extra_penalty = len(extra) * self.extra_note_penalty
         
         # Final score
         if template_score > 0:
