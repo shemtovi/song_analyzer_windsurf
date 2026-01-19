@@ -60,30 +60,26 @@ This document tracks development progress and planned work for the Song Analyzer
   - Added: `min_note_velocity: 30` to filter ghost notes
   - Test: Silence/noise handling ✓
 
-### Phase C: Enhanced Cleanup Pipeline (Processing Layer)
+### Phase C: Enhanced Cleanup Pipeline (Processing Layer) - COMPLETED
 
-- [ ] **C.1 Enable aggressive cleanup by default for noisy audio**
-  - File: `src/processing/cleanup.py:21-45`
-  - Current: `enable_all: False`
-  - Fix: Add noise detection, auto-enable aggressive mode
-  - Test: Noisy audio cleanup stats
+- [x] **C.1 Enable aggressive cleanup by default for noisy audio** (commit 3895651)
+  - Added: `auto_aggressive: True` config option
+  - Auto-detects noise (>15 notes/sec threshold)
+  - Enables all filters when noise detected ✓
 
-- [ ] **C.2 Improve harmonic detection**
-  - File: `src/processing/cleanup.py:275-332`
-  - Issue: Only checks 2-5x frequency ratios
-  - Fix: Add spectral centroid validation, check more ratios
-  - Test: Harmonic removal accuracy
+- [x] **C.2 Improve harmonic detection** (commit 3895651)
+  - Extended: `harmonic_ratios: (2,3,4,5) → (2,3,4,5,6,7,8)`
+  - Made ratios configurable in CleanupConfig
+  - Added frequency range check ✓
 
-- [ ] **C.3 Add adaptive velocity threshold**
-  - File: `src/processing/cleanup.py:198-200`
-  - Current: Fixed `min_velocity: 20`
-  - Fix: Calculate from audio's noise floor
-  - Test: Dynamic threshold effectiveness
+- [x] **C.3 Add adaptive velocity threshold** (commit 3895651)
+  - Added: `adaptive_velocity: True` config option
+  - Uses percentile-based threshold (15th percentile)
+  - Takes higher of fixed and adaptive threshold ✓
 
-- [ ] **C.4 Add note density filter**
-  - Issue: Unrealistic note densities (too many notes per second)
-  - Fix: Configurable `max_notes_per_second` filter
-  - Test: Note density validation
+- [x] **C.4 Add note density filter** (commit 3895651)
+  - Added: `max_notes_per_second: 20` config option
+  - `filter_by_density()` keeps loudest notes per window ✓
 
 ### Phase D: Separation Performance (Separation Layer)
 
@@ -153,9 +149,9 @@ This document tracks development progress and planned work for the Song Analyzer
 
 ## Test Status
 
-- **Total Tests:** 128 (+16 noise rejection tests)
+- **Total Tests:** 143 (+15 cleanup tests)
 - **Status:** All passing
-- **Coverage:** Noise rejection, configurable thresholds, chord detection
+- **Coverage:** Noise rejection, configurable thresholds, chord detection, cleanup pipeline
 
 ---
 
