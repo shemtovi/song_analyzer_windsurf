@@ -28,10 +28,16 @@ class CleanupConfig:
         max_gap_to_fill: Maximum gap to fill between same-pitch notes (default: 0.05)
         remove_harmonics: Whether to filter harmonic overtones (default: True)
         harmonic_tolerance_cents: Tolerance for harmonic detection in cents (default: 50)
+        harmonic_ratios: Harmonic frequency ratios to check (default: 2-8)
         deduplicate_time_tolerance: Time window for deduplication in seconds (default: 0.03)
         outlier_pitch_std_factor: Standard deviations for outlier detection (default: 2.5)
         smooth_min_gap: Minimum gap for temporal smoothing (default: 0.1)
         enable_all: Enable all cleanup operations (default: False)
+        auto_aggressive: Automatically enable aggressive mode for noisy input (default: True)
+        noise_threshold_notes_per_sec: Notes/sec threshold for noise detection (default: 15)
+        adaptive_velocity: Use adaptive velocity threshold based on distribution (default: True)
+        adaptive_velocity_percentile: Percentile for adaptive velocity (default: 15)
+        max_notes_per_second: Maximum notes per second (0 = no limit, default: 20)
     """
 
     min_velocity: int = 20
@@ -39,10 +45,16 @@ class CleanupConfig:
     max_gap_to_fill: float = 0.05
     remove_harmonics: bool = True
     harmonic_tolerance_cents: float = 50.0
+    harmonic_ratios: Tuple[int, ...] = (2, 3, 4, 5, 6, 7, 8)
     deduplicate_time_tolerance: float = 0.03
     outlier_pitch_std_factor: float = 2.5
     smooth_min_gap: float = 0.1
     enable_all: bool = False
+    auto_aggressive: bool = True
+    noise_threshold_notes_per_sec: float = 15.0
+    adaptive_velocity: bool = True
+    adaptive_velocity_percentile: float = 15.0
+    max_notes_per_second: float = 20.0
 
 
 @dataclass
@@ -56,8 +68,12 @@ class CleanupStats:
     removed_harmonics: int = 0
     removed_duplicates: int = 0
     removed_outliers: int = 0
+    removed_density: int = 0
+    removed_adaptive_velocity: int = 0
     merged_notes: int = 0
     filled_gaps: int = 0
+    auto_aggressive_enabled: bool = False
+    detected_notes_per_sec: float = 0.0
 
     @property
     def total_removed(self) -> int:
@@ -117,20 +133,46 @@ class NoteCleanup:
         """
         stats = CleanupStats(original_count=len(notes))
 
+        if not notes:
+            if return_stats:
+                return notes, stats
+            return notes
+
+        # Detect noisy input (C.1) and calculate notes per second
+        notes_per_sec = self._calculate_notes_per_second(notes)
+        stats.detected_notes_per_sec = notes_per_sec
+
+        use_aggressive = self.config.enable_all
+        if self.config.auto_aggressive and notes_per_sec > self.config.noise_threshold_notes_per_sec:
+            use_aggressive = True
+            stats.auto_aggressive_enabled = True
+
+        # Apply adaptive velocity threshold (C.3) before other filters
+        if self.config.adaptive_velocity and len(notes) >= 5:
+            count_before = len(notes)
+            notes = self._apply_adaptive_velocity(notes)
+            stats.removed_adaptive_velocity = count_before - len(notes)
+
         # Core cleanup
         notes = self.remove_ghost_notes(notes)
-        stats.removed_ghost_notes = stats.original_count - len(notes)
+        stats.removed_ghost_notes = stats.original_count - len(notes) - stats.removed_adaptive_velocity
 
         notes = self.merge_short_notes(notes)
         notes = self.fill_gaps(notes)
 
-        # Advanced cleanup if enabled
-        if self.config.enable_all or self.config.remove_harmonics:
+        # Apply note density filter (C.4)
+        if self.config.max_notes_per_second > 0:
+            count_before = len(notes)
+            notes = self.filter_by_density(notes)
+            stats.removed_density = count_before - len(notes)
+
+        # Advanced cleanup if enabled or auto-aggressive
+        if use_aggressive or self.config.remove_harmonics:
             count_before = len(notes)
             notes = self.remove_harmonics(notes)
             stats.removed_harmonics = count_before - len(notes)
 
-        if self.config.enable_all:
+        if use_aggressive:
             count_before = len(notes)
             notes = self.deduplicate_frames(notes)
             stats.removed_duplicates = count_before - len(notes)
@@ -139,11 +181,118 @@ class NoteCleanup:
             notes = self.filter_outliers(notes)
             stats.removed_outliers = count_before - len(notes)
 
+            # Also apply temporal smoothing in aggressive mode
+            notes = self.smooth_temporal(notes)
+
         stats.final_count = len(notes)
 
         if return_stats:
             return notes, stats
         return notes
+
+    def _calculate_notes_per_second(self, notes: List[Note]) -> float:
+        """Calculate the note density (notes per second).
+
+        Args:
+            notes: List of notes
+
+        Returns:
+            Average notes per second
+        """
+        if not notes or len(notes) < 2:
+            return 0.0
+
+        min_time = min(n.onset for n in notes)
+        max_time = max(n.offset for n in notes)
+        duration = max_time - min_time
+
+        if duration <= 0:
+            return 0.0
+
+        return len(notes) / duration
+
+    def _apply_adaptive_velocity(self, notes: List[Note]) -> List[Note]:
+        """Apply adaptive velocity threshold based on note distribution.
+
+        Instead of a fixed threshold, use the distribution of velocities
+        to set a percentile-based threshold.
+
+        Args:
+            notes: List of notes
+
+        Returns:
+            Filtered notes
+        """
+        if not notes:
+            return notes
+
+        velocities = [n.velocity for n in notes]
+        threshold = np.percentile(velocities, self.config.adaptive_velocity_percentile)
+
+        # Use the higher of fixed min_velocity and adaptive threshold
+        effective_threshold = max(self.config.min_velocity, threshold)
+
+        return [n for n in notes if n.velocity >= effective_threshold]
+
+    def filter_by_density(
+        self,
+        notes: List[Note],
+        max_notes_per_second: Optional[float] = None,
+        window_size: float = 1.0,
+    ) -> List[Note]:
+        """Filter notes to limit density (notes per second).
+
+        When there are too many notes in a time window, keep only the
+        loudest ones.
+
+        Args:
+            notes: List of notes
+            max_notes_per_second: Maximum notes per second (default: from config)
+            window_size: Window size in seconds for density calculation
+
+        Returns:
+            Filtered notes with limited density
+        """
+        if not notes:
+            return notes
+
+        max_nps = max_notes_per_second or self.config.max_notes_per_second
+        if max_nps <= 0:
+            return notes
+
+        max_notes_per_window = int(max_nps * window_size)
+
+        # Find time range
+        min_time = min(n.onset for n in notes)
+        max_time = max(n.offset for n in notes)
+
+        keep_indices: Set[int] = set()
+        notes_list = list(notes)
+
+        # Process each window
+        current_time = min_time
+        while current_time < max_time:
+            window_end = current_time + window_size
+
+            # Find notes starting in this window
+            window_notes = [
+                (i, n) for i, n in enumerate(notes_list)
+                if current_time <= n.onset < window_end
+            ]
+
+            if len(window_notes) > max_notes_per_window:
+                # Keep only the loudest notes
+                window_notes.sort(key=lambda x: x[1].velocity, reverse=True)
+                for i, _ in window_notes[:max_notes_per_window]:
+                    keep_indices.add(i)
+            else:
+                # Keep all notes in this window
+                for i, _ in window_notes:
+                    keep_indices.add(i)
+
+            current_time = window_end
+
+        return [notes_list[i] for i in sorted(keep_indices)]
 
     def cleanup_aggressive(
         self,
@@ -276,6 +425,7 @@ class NoteCleanup:
         self,
         notes: List[Note],
         tolerance_cents: Optional[float] = None,
+        harmonic_ratios: Optional[Tuple[int, ...]] = None,
     ) -> List[Note]:
         """Remove likely harmonic overtones.
 
@@ -287,6 +437,7 @@ class NoteCleanup:
         Args:
             notes: List of notes
             tolerance_cents: Pitch tolerance in cents (default: from config)
+            harmonic_ratios: Harmonic ratios to check (default: from config)
 
         Returns:
             List with harmonics removed
@@ -295,17 +446,20 @@ class NoteCleanup:
             return notes
 
         tolerance_cents = tolerance_cents or self.config.harmonic_tolerance_cents
-        tolerance_semitones = tolerance_cents / 100.0
+        harmonic_ratios = harmonic_ratios or self.config.harmonic_ratios
 
         # Group notes by overlapping time
         keep_notes: Set[int] = set(range(len(notes)))
         notes_list = list(notes)
 
+        # Pre-calculate frequencies for all notes
+        note_freqs = [440.0 * (2 ** ((n.pitch - 69) / 12.0)) for n in notes_list]
+
         for i, note in enumerate(notes_list):
             if i not in keep_notes:
                 continue
 
-            note_freq = 440.0 * (2 ** ((note.pitch - 69) / 12.0))
+            note_freq = note_freqs[i]
 
             for j, other in enumerate(notes_list):
                 if i == j or j not in keep_notes:
@@ -315,17 +469,27 @@ class NoteCleanup:
                 if not (other.onset < note.offset and other.offset > note.onset):
                     continue
 
-                other_freq = 440.0 * (2 ** ((other.pitch - 69) / 12.0))
+                other_freq = note_freqs[j]
 
-                # Check if other is a harmonic of note (2x, 3x, 4x, 5x frequency)
-                for harmonic in [2, 3, 4, 5]:
+                # Check if other is a harmonic of note (configurable ratios)
+                for harmonic in harmonic_ratios:
                     expected_freq = note_freq * harmonic
+
+                    # Skip if expected frequency is out of typical musical range
+                    if expected_freq > 10000:  # Above ~D10
+                        continue
+
                     # Convert frequency difference to cents
-                    if expected_freq > 0:
+                    if expected_freq > 0 and other_freq > 0:
                         cents_diff = 1200 * np.log2(other_freq / expected_freq)
                         if abs(cents_diff) < tolerance_cents:
                             # other is likely a harmonic - remove if quieter
-                            if other.velocity <= note.velocity:
+                            # Also consider removing if significantly quieter even if fundamental
+                            velocity_ratio = other.velocity / (note.velocity + 1)
+                            if velocity_ratio <= 1.0:
+                                keep_notes.discard(j)
+                            elif velocity_ratio < 0.7:
+                                # Much quieter, likely harmonic even if louder fundamental
                                 keep_notes.discard(j)
                             break
 
