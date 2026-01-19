@@ -6,6 +6,148 @@ This document tracks development progress and planned work for the Song Analyzer
 
 ---
 
+## Current Focus: Stages 1-3 Improvements
+
+**Goal:** Reduce false positives (extra notes/chords), improve noise filtering, and optimize separation performance.
+
+### Identified Issues
+
+| Issue | Layer | Root Cause | Impact |
+|-------|-------|------------|--------|
+| Too many false notes | Transcription | Low confidence thresholds (0.5 CREPE, 0.3 onset) | Extra notes in output |
+| Ghost chords detected | Inference | No chord confidence threshold, min 2 notes | Spurious chord detections |
+| Background noise passes through | Processing | Cleanup not aggressive by default | Noise becomes notes |
+| Slow separation | Separation | htdemucs model, no fast alternatives | Long processing time |
+
+---
+
+## Improvement Roadmap
+
+### Phase A: Note Filtering Improvements (Transcription Layer)
+
+- [ ] **A.1 Increase CREPE confidence threshold**
+  - File: `src/transcription/monophonic.py:19`
+  - Current: `pitch_confidence_threshold: 0.5`
+  - Target: `0.65-0.7` (configurable)
+  - Test: Single note detection accuracy
+
+- [ ] **A.2 Improve onset detection threshold**
+  - File: `src/transcription/monophonic.py:17`
+  - Current: `onset_threshold: 0.3`
+  - Target: `0.4-0.5` (adaptive based on noise floor)
+  - Test: Note onset accuracy
+
+- [ ] **A.3 Add polyphonic peak validation**
+  - File: `src/transcription/polyphonic.py:228-238`
+  - Issue: CQT peak detection accepts any peak > 30% of segment max
+  - Fix: Add harmonicity check, spectral flatness filter
+  - Test: Chord detection precision
+
+- [ ] **A.4 Add minimum note energy threshold**
+  - File: `src/transcription/monophonic.py:197`
+  - Issue: RMS-to-velocity mapping accepts very quiet signals
+  - Fix: Add configurable `min_rms_threshold`
+  - Test: Ghost note rejection
+
+### Phase B: Chord Detection Improvements (Inference Layer)
+
+- [ ] **B.1 Add chord confidence threshold**
+  - File: `src/inference/chords.py:520-565`
+  - Issue: Always returns best match, even if poor
+  - Fix: Add `min_chord_confidence: 0.5` parameter
+  - Test: Chord detection precision/recall
+
+- [ ] **B.2 Increase minimum notes for chord**
+  - File: `src/inference/chords.py:262`
+  - Current: `min_notes_for_chord: 2`
+  - Target: `3` (triads minimum)
+  - Test: False chord rejection
+
+- [ ] **B.3 Increase extra note penalty**
+  - File: `src/inference/chords.py:552`
+  - Current: `-0.05` per extra note
+  - Target: `-0.1` to `-0.15`
+  - Test: Extended chord vs noise differentiation
+
+- [ ] **B.4 Add noise-based chord rejection**
+  - Issue: Noisy segments still produce chord detections
+  - Fix: Check spectral flatness before chord analysis
+  - Test: Silence/noise handling
+
+### Phase C: Enhanced Cleanup Pipeline (Processing Layer)
+
+- [ ] **C.1 Enable aggressive cleanup by default for noisy audio**
+  - File: `src/processing/cleanup.py:21-45`
+  - Current: `enable_all: False`
+  - Fix: Add noise detection, auto-enable aggressive mode
+  - Test: Noisy audio cleanup stats
+
+- [ ] **C.2 Improve harmonic detection**
+  - File: `src/processing/cleanup.py:275-332`
+  - Issue: Only checks 2-5x frequency ratios
+  - Fix: Add spectral centroid validation, check more ratios
+  - Test: Harmonic removal accuracy
+
+- [ ] **C.3 Add adaptive velocity threshold**
+  - File: `src/processing/cleanup.py:198-200`
+  - Current: Fixed `min_velocity: 20`
+  - Fix: Calculate from audio's noise floor
+  - Test: Dynamic threshold effectiveness
+
+- [ ] **C.4 Add note density filter**
+  - Issue: Unrealistic note densities (too many notes per second)
+  - Fix: Configurable `max_notes_per_second` filter
+  - Test: Note density validation
+
+### Phase D: Separation Performance (Separation Layer)
+
+- [ ] **D.1 Add model speed presets**
+  - File: `src/separation/demucs_separator.py:200-205`
+  - Add: `speed` parameter ("fast", "balanced", "quality")
+  - fast: `mdx` model
+  - balanced: `htdemucs` (current default)
+  - quality: `htdemucs_ft`
+  - Test: Speed vs quality benchmarks
+
+- [ ] **D.2 Optimize segment processing**
+  - File: `src/separation/demucs_separator.py:219`
+  - Current: `segment_length: 10.0`
+  - Test: Optimal segment size for speed/quality
+
+- [ ] **D.3 Add stem-specific processing**
+  - Issue: All stems processed even if only one needed
+  - Fix: Early exit if only specific stems requested
+  - Test: Single-stem processing time
+
+- [ ] **D.4 Improve fallback quality**
+  - File: `src/separation/demucs_separator.py:661-771`
+  - Issue: Simple bandpass filters are crude
+  - Fix: Add spectral unmixing, better frequency bands
+  - Test: Fallback quality metrics
+
+### Phase E: Testing & Validation
+
+- [ ] **E.1 Create noise rejection test suite**
+  - Test white noise → expect 0 notes
+  - Test pink noise → expect 0 notes
+  - Test silence → expect 0 notes
+
+- [ ] **E.2 Create precision/recall benchmarks**
+  - Compare detected notes vs ground truth
+  - Measure chord detection accuracy
+  - Track false positive rates
+
+- [ ] **E.3 Create performance benchmarks**
+  - Separation time by model
+  - Transcription time by length
+  - Memory usage profiling
+
+- [ ] **E.4 Add regression tests**
+  - Test files with known issues
+  - Prevent reintroduction of bugs
+
+---
+
 ## Completed Work (Since 19ae231)
 
 ### Commit History
@@ -18,123 +160,28 @@ This document tracks development progress and planned work for the Song Analyzer
 | `92cfcfd` | Added CleanupConfig and CleanupStats to processing | 2 files (+434 lines) |
 | `49879fe` | Refactored CLI with improved commands | 1 file (+146 lines) |
 | `cb6545d` | Added disk-based caching to SourceSeparator | 1 file (+274 lines) |
-
-### Summary of Changes
-
-1. **Testing Infrastructure (19ae231)**
-   - Benchmarking framework (`tests/benchmarks/bench_framework.py`)
-   - Transcription benchmarks (`tests/benchmarks/bench_transcription.py`)
-   - Test fixture generator (`tests/fixtures/generate_fixtures.py`)
-   - Baseline metrics (`tests/benchmarks/baselines.json`)
-
-2. **Documentation (d14883f)**
-   - Complete architecture documentation (`docs/ARCHITECTURE.md`)
-   - Updated README with project status, CLI commands, architecture diagram
-
-3. **Code Cleanup (c266eb6)**
-   - Removed legacy `src/transcriber/` folder (duplicate of `src/transcription/`)
-   - Cleaned up multi_instrument.py imports
-
-4. **Processing Enhancement (92cfcfd)**
-   - Added `CleanupConfig` dataclass for configurable note cleanup
-   - Added `CleanupStats` dataclass for cleanup statistics
-   - Enhanced `NoteCleanup` class with detailed statistics tracking
-
-5. **CLI Refactor (49879fe)**
-   - Improved command structure and options
-   - Better error handling and output formatting
-
-6. **Caching Feature (cb6545d)**
-   - Disk-based caching for Demucs separation results
-   - MD5-based cache keys from audio content
-   - 24-hour TTL with configurable expiration
-   - Cache management methods (clear_cache, get_cache_stats)
-   - Automatic GPU detection with detailed device info
+| `a08f184` | Added WORK_PLAN.md document | 1 file (+174 lines) |
 
 ---
 
-## Current Test Status
+## Test Status
 
 - **Total Tests:** 112
 - **Status:** All passing
-- **Warnings:** 3 (expected - related to Demucs fallback and librosa FFT size)
+- **Target:** Add 20+ tests for improvements
 
 ---
 
-## Phase Status
+## Key Thresholds Reference
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| Phase 1 | Complete | Monophonic transcription (pYIN-based) |
-| Phase 2 | Complete | Polyphonic transcription (CQT-based) |
-| Phase 3 | Complete | Multi-instrument separation (Demucs) |
-| Phase 4 | **Planned** | PDF sheet music rendering |
-
----
-
-## Next Steps (Phase 4: PDF Sheet Music)
-
-### High Priority
-
-- [ ] **4.1 LilyPond Integration**
-  - Add LilyPond export from Note list
-  - Support for key signatures, time signatures
-  - Basic engraving options
-
-- [ ] **4.2 PDF Generation**
-  - LilyPond to PDF pipeline
-  - Sheet music layout configuration
-  - Page sizing and margins
-
-- [ ] **4.3 CLI Command**
-  - Add `render` command for PDF output
-  - Options: paper size, template, layout
-
-### Medium Priority
-
-- [ ] **4.4 Music Notation Improvements**
-  - Automatic beaming
-  - Tuplet detection and notation
-  - Dynamic markings from velocity
-
-- [ ] **4.5 Multi-voice Support**
-  - Split polyphonic notes into voices
-  - Automatic voice separation algorithm
-  - Grand staff for piano
-
-### Lower Priority
-
-- [ ] **4.6 Score Presentation**
-  - Title, composer, tempo markings
-  - Rehearsal marks
-  - Repeat signs and endings
-
----
-
-## Technical Debt
-
-- [ ] Add unit tests for new caching feature in SourceSeparator
-- [ ] Add integration tests for CLI commands
-- [ ] Improve error messages for missing dependencies
-- [ ] Document cache configuration options
-
----
-
-## Performance Improvements (Future)
-
-- [ ] GPU batch processing for multiple files
-- [ ] Streaming transcription for long audio
-- [ ] Memory optimization for large files
-- [ ] Parallel stem transcription
-
----
-
-## How to Update This Plan
-
-1. Mark completed items with `[x]`
-2. Add new items as they are identified
-3. Update the "Last Updated" date
-4. Commit with descriptive message
+| Parameter | File | Current | Proposed |
+|-----------|------|---------|----------|
+| `pitch_confidence_threshold` | monophonic.py:19 | 0.5 | 0.65-0.7 |
+| `onset_threshold` | monophonic.py:17 | 0.3 | 0.4-0.5 |
+| `min_chord_duration` | chords.py:260 | 0.25s | 0.25s (keep) |
+| `min_notes_for_chord` | chords.py:262 | 2 | 3 |
+| `min_velocity` | cleanup.py:22 | 20 | adaptive |
+| `frame_threshold` | polyphonic.py:25 | 0.1 | 0.2-0.3 |
 
 ---
 
@@ -148,7 +195,7 @@ pytest tests/ -v
 pytest --cov=src tests/
 
 # Run specific test file
-pytest tests/test_multi_instrument.py -v
+pytest tests/test_transcriber.py -v
 
 # Run benchmarks
 python tests/benchmarks/bench_transcription.py
@@ -156,19 +203,16 @@ python tests/benchmarks/bench_transcription.py
 
 ---
 
-## Git Workflow
+## Implementation Order
 
-```bash
-# Check current status
-git status
+1. **Start with A.1** - Increase CREPE threshold (quick win, low risk)
+2. **Then B.1** - Add chord confidence threshold
+3. **Then C.1** - Enable aggressive cleanup for noisy audio
+4. **Then E.1** - Create noise rejection tests
+5. **Continue with remaining items in order**
 
-# View recent commits
-git log --oneline -10
-
-# Commit incrementally
-git add <file>
-git commit -m "descriptive message"
-
-# Run tests before pushing
-pytest tests/ -v
-```
+Each change should be:
+1. Implemented
+2. Tested locally
+3. Committed with descriptive message
+4. Verified with pytest
