@@ -14,31 +14,40 @@ from ..core import Note
 class PolyphonicTranscriber(Transcriber):
     """
     Polyphonic audio transcriber for detecting multiple simultaneous notes.
-    
+
     Uses piano_transcription_inference (Onsets and Frames based) when available,
     falls back to CQT-based multi-pitch detection otherwise.
     """
 
     def __init__(
         self,
-        onset_threshold: float = 0.3,
-        frame_threshold: float = 0.1,
+        onset_threshold: float = 0.4,
+        frame_threshold: float = 0.2,
         min_note_duration: float = 0.05,
         device: str = "cpu",
+        min_peak_energy: float = 0.15,
+        min_rms_threshold: float = 0.01,
+        max_notes_per_segment: int = 8,
     ):
         """
         Initialize PolyphonicTranscriber.
 
         Args:
-            onset_threshold: Threshold for onset detection (0-1)
-            frame_threshold: Threshold for frame-level detection (0-1)
+            onset_threshold: Threshold for onset detection (0-1, higher = fewer onsets)
+            frame_threshold: Threshold for frame-level detection (0-1, higher = fewer notes)
             min_note_duration: Minimum note duration in seconds
             device: Device for inference ('cpu' or 'cuda')
+            min_peak_energy: Minimum CQT peak energy (0-1) to consider as note
+            min_rms_threshold: Minimum RMS energy to process segment (filters noise)
+            max_notes_per_segment: Maximum notes per segment (prevents noise explosion)
         """
         self.onset_threshold = onset_threshold
         self.frame_threshold = frame_threshold
         self.min_note_duration = min_note_duration
         self.device = device
+        self.min_peak_energy = min_peak_energy
+        self.min_rms_threshold = min_rms_threshold
+        self.max_notes_per_segment = max_notes_per_segment
         self._transcriptor = None
         self._use_neural = self._check_neural_available()
 
@@ -152,13 +161,13 @@ class PolyphonicTranscriber(Transcriber):
     def _transcribe_cqt(self, audio: np.ndarray, sr: int) -> List[Note]:
         """
         Fallback: CQT-based multi-pitch detection.
-        
+
         Uses Constant-Q Transform with peak detection to find
         multiple simultaneous pitches. Less accurate than neural
         but works without PyTorch.
         """
         from scipy.signal import find_peaks
-        
+
         # Parameters - focus on typical musical range (C2 to C7)
         hop_length = 512
         n_bins = 60  # 5 octaves (C2-C7)
@@ -184,39 +193,48 @@ class PolyphonicTranscriber(Transcriber):
         for i in range(1, C.shape[1]):
             diff = C_norm[:, i] - C_norm[:, i-1]
             spectral_flux[i] = np.sum(np.maximum(diff, 0))
-        
+
         # Find peaks in spectral flux (these are onset candidates)
-        from scipy.signal import find_peaks as fp
-        flux_peaks, _ = fp(spectral_flux, height=np.mean(spectral_flux) + np.std(spectral_flux), distance=int(0.1 * sr / hop_length))
-        
+        # Increased threshold: mean + 1.5*std (was mean + std)
+        flux_threshold = np.mean(spectral_flux) + 1.5 * np.std(spectral_flux)
+        flux_peaks, _ = find_peaks(
+            spectral_flux,
+            height=flux_threshold,
+            distance=int(0.1 * sr / hop_length)
+        )
+
         # Convert to times
         times = librosa.times_like(C, sr=sr, hop_length=hop_length)
         onsets = times[flux_peaks] if len(flux_peaks) > 0 else np.array([])
 
         # Add start and end points
-        times = librosa.times_like(C, sr=sr, hop_length=hop_length)
         duration = len(audio) / sr
-        
+
         if len(onsets) == 0:
             onsets = np.array([0.0])
         onsets = np.concatenate([[0.0], onsets, [duration]])
         onsets = np.unique(onsets)
 
         notes = []
-        
+
         # For each segment between onsets, detect active pitches
         for i in range(len(onsets) - 1):
             onset_time = onsets[i]
             offset_time = onsets[i + 1]
-            
+
             # Skip very short segments
             if (offset_time - onset_time) < self.min_note_duration:
+                continue
+
+            # Check RMS energy of segment - skip quiet/noisy segments
+            segment_rms = self._get_segment_rms(audio, sr, onset_time, offset_time)
+            if segment_rms < self.min_rms_threshold:
                 continue
 
             # Get frame indices for this segment
             start_frame = int(onset_time * sr / hop_length)
             end_frame = int(offset_time * sr / hop_length)
-            
+
             if start_frame >= end_frame or start_frame >= C.shape[1]:
                 continue
 
@@ -227,40 +245,56 @@ class PolyphonicTranscriber(Transcriber):
 
             # Find peaks in the spectrum
             max_energy = np.max(segment_energy)
-            if max_energy < 0.1:
-                continue  # Skip silent segments
-                
+            if max_energy < self.min_peak_energy:
+                continue  # Skip silent/noisy segments
+
+            # Check spectral flatness - high flatness indicates noise
+            spectral_flatness = self._compute_spectral_flatness(segment_energy)
+            if spectral_flatness > 0.8:
+                continue  # Skip noise-like segments
+
+            # Find peaks with stricter thresholds
             peaks, properties = find_peaks(
-                segment_energy, 
-                height=max_energy * 0.3,
+                segment_energy,
+                height=max(max_energy * 0.4, self.min_peak_energy),  # Increased from 0.3
                 distance=2,
-                prominence=0.05,
+                prominence=0.08,  # Increased from 0.05
             )
-            
+
             if len(peaks) == 0:
-                active_bins = np.where(segment_energy > max_energy * 0.5)[0]
+                # Fallback: only take bins with very high energy
+                active_bins = np.where(segment_energy > max_energy * 0.6)[0]
             else:
                 active_bins = peaks
 
             if len(active_bins) == 0:
                 continue
 
+            # Limit notes per segment to prevent noise explosion
+            if len(active_bins) > self.max_notes_per_segment:
+                # Keep only the strongest peaks
+                peak_energies = segment_energy[active_bins]
+                top_indices = np.argsort(peak_energies)[-self.max_notes_per_segment:]
+                active_bins = active_bins[top_indices]
+
             # Convert bin indices to MIDI pitches
             midi_base = 36  # C2
 
+            segment_notes = []
             for bin_idx in active_bins:
                 midi_pitch = midi_base + bin_idx
-                
+
                 if midi_pitch < 21 or midi_pitch > 108:
                     continue
 
-                velocity = int(min(127, max(1, segment_energy[bin_idx] * 127)))
-
-                duration = offset_time - onset_time
-                if duration < self.min_note_duration:
+                # Only include notes with sufficient energy
+                note_energy = segment_energy[bin_idx]
+                if note_energy < self.min_peak_energy:
                     continue
 
-                notes.append(
+                velocity = int(min(127, max(20, note_energy * 127)))
+
+                segment_notes.append(
                     Note(
                         pitch=midi_pitch,
                         onset=onset_time,
@@ -269,10 +303,49 @@ class PolyphonicTranscriber(Transcriber):
                     )
                 )
 
+            notes.extend(segment_notes)
+
         notes = self._merge_duplicate_notes(notes)
         notes.sort(key=lambda n: (n.onset, n.pitch))
-        
+
         return notes
+
+    def _get_segment_rms(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        start_time: float,
+        end_time: float,
+    ) -> float:
+        """Calculate RMS energy for an audio segment."""
+        start_sample = int(start_time * sr)
+        end_sample = int(end_time * sr)
+        segment = audio[start_sample:end_sample]
+
+        if len(segment) == 0:
+            return 0.0
+
+        return float(np.sqrt(np.mean(segment**2)))
+
+    def _compute_spectral_flatness(self, spectrum: np.ndarray) -> float:
+        """
+        Compute spectral flatness (Wiener entropy).
+
+        Returns value between 0 (tonal) and 1 (noise-like).
+        High values indicate noise rather than musical content.
+        """
+        # Avoid log(0)
+        spectrum = np.maximum(spectrum, 1e-10)
+
+        # Geometric mean / Arithmetic mean
+        geometric_mean = np.exp(np.mean(np.log(spectrum)))
+        arithmetic_mean = np.mean(spectrum)
+
+        if arithmetic_mean == 0:
+            return 1.0
+
+        flatness = geometric_mean / arithmetic_mean
+        return float(np.clip(flatness, 0.0, 1.0))
 
     def _merge_duplicate_notes(self, notes: List[Note]) -> List[Note]:
         """Merge notes with same pitch and overlapping times."""
