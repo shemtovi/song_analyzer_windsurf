@@ -5,10 +5,19 @@ Supports multiple models:
 - htdemucs: 4 stems (drums, bass, vocals, other)
 - htdemucs_6s: 6 stems (drums, bass, vocals, guitar, piano, other)
 
+Features:
+- Disk-based caching of separated stems for faster re-processing
+- Automatic GPU detection (CUDA, MPS)
+- Fallback to frequency-band separation when Demucs unavailable
+
 Reference: https://github.com/facebookresearch/demucs
 """
 
 import numpy as np
+import hashlib
+import json
+import pickle
+import time
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -169,16 +178,24 @@ class SeparatedStems:
 class SourceSeparator:
     """
     Audio source separator using Demucs.
-    
+
     Separates audio into stems (drums, bass, vocals, other) for
     per-instrument transcription.
-    
+
+    Features:
+    - Disk-based caching: Re-processing the same audio is instant
+    - GPU auto-detection: Uses CUDA or MPS when available
+    - Graceful fallback: Uses frequency-band filtering when Demucs unavailable
+
     Usage:
         separator = SourceSeparator()
         stems = separator.separate(audio, sr)
         bass_audio = stems.get_stem(StemType.BASS).to_mono()
+
+        # With caching disabled
+        stems = separator.separate(audio, sr, use_cache=False)
     """
-    
+
     # Available Demucs models
     MODELS = {
         "htdemucs": "4-stem: drums, bass, vocals, other (recommended)",
@@ -187,16 +204,18 @@ class SourceSeparator:
         "mdx_extra": "4-stem MDX-Net (good quality, faster)",
         "mdx": "4-stem MDX-Net base (fastest)",
     }
-    
+
     # Models that output 6 stems
     SIX_STEM_MODELS = {"htdemucs_6s"}
-    
+
     # Stem order for each model type
     STEM_ORDER_4 = ["drums", "bass", "other", "vocals"]
     STEM_ORDER_6 = ["drums", "bass", "other", "vocals", "guitar", "piano"]
-    
+
     DEFAULT_MODEL = "htdemucs"
-    
+    DEFAULT_CACHE_DIR = Path(tempfile.gettempdir()) / "song_analyzer_cache"
+    CACHE_TTL_HOURS = 24  # Cache entries expire after 24 hours
+
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
@@ -204,25 +223,36 @@ class SourceSeparator:
         segment_length: float = 10.0,
         overlap: float = 0.25,
         jobs: int = 0,
+        cache_dir: Optional[Path] = None,
+        enable_cache: bool = True,
     ):
         """
         Initialize SourceSeparator.
-        
+
         Args:
             model_name: Demucs model to use (htdemucs, htdemucs_ft, mdx, mdx_extra)
             device: Device for inference ('auto', 'cpu', 'cuda', 'mps')
             segment_length: Process audio in chunks of this length (seconds)
             overlap: Overlap between segments (0-1)
             jobs: Number of parallel jobs (0=auto)
+            cache_dir: Directory for caching separated stems (default: temp dir)
+            enable_cache: Enable disk-based caching of results (default: True)
         """
         self.model_name = model_name
         self.device = device
         self.segment_length = segment_length
         self.overlap = overlap
         self.jobs = jobs
-        
+        self.cache_dir = cache_dir or self.DEFAULT_CACHE_DIR
+        self.enable_cache = enable_cache
+
         self._model = None
         self._demucs_available = self._check_demucs_available()
+        self._device_info: Optional[Dict[str, str]] = None
+
+        # Initialize cache directory
+        if self.enable_cache:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
     
     def _check_demucs_available(self) -> bool:
         """Check if Demucs is available."""
@@ -232,22 +262,220 @@ class SourceSeparator:
             return True
         except ImportError:
             return False
-    
+
     def _get_device(self) -> str:
-        """Determine the best device to use."""
+        """Determine the best device to use with detailed detection."""
         if self.device != "auto":
             return self.device
-        
+
+        device = "cpu"
+        device_info = {"requested": self.device, "selected": "cpu"}
+
         try:
             import torch
+
+            # Check CUDA (NVIDIA GPU)
             if torch.cuda.is_available():
-                return "cuda"
+                device = "cuda"
+                device_info["selected"] = "cuda"
+                device_info["cuda_device"] = torch.cuda.get_device_name(0)
+                device_info["cuda_version"] = torch.version.cuda or "unknown"
+
+            # Check MPS (Apple Silicon)
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
+                # Additional check for MPS functionality
+                try:
+                    # Test MPS is actually usable
+                    test_tensor = torch.zeros(1, device="mps")
+                    del test_tensor
+                    device = "mps"
+                    device_info["selected"] = "mps"
+                    device_info["mps_available"] = True
+                except Exception:
+                    device_info["mps_available"] = False
+                    device_info["mps_error"] = "MPS available but not functional"
+
+            device_info["torch_version"] = torch.__version__
+
         except ImportError:
-            pass
-        
-        return "cpu"
+            device_info["error"] = "torch not installed"
+
+        self._device_info = device_info
+        return device
+
+    def get_device_info(self) -> Dict[str, str]:
+        """Get information about the selected compute device."""
+        if self._device_info is None:
+            self._get_device()
+        return self._device_info or {}
+
+    def _get_cache_key(self, audio: np.ndarray, sample_rate: int) -> str:
+        """Generate a cache key based on audio content and settings.
+
+        The key is based on:
+        - Audio content hash
+        - Sample rate
+        - Model name
+
+        Returns:
+            16-character hex string
+        """
+        # Hash audio content (first 1M samples for speed on long files)
+        audio_bytes = audio[:1_000_000].tobytes() if len(audio) > 1_000_000 else audio.tobytes()
+        content_hash = hashlib.md5(audio_bytes).hexdigest()[:12]
+
+        # Include settings in key
+        settings_str = f"{sample_rate}_{self.model_name}"
+        settings_hash = hashlib.md5(settings_str.encode()).hexdigest()[:4]
+
+        return f"{content_hash}_{settings_hash}"
+
+    def _get_cache_path(self, cache_key: str) -> Path:
+        """Get the cache file path for a given key."""
+        return self.cache_dir / f"stems_{cache_key}.pkl"
+
+    def _load_from_cache(
+        self,
+        cache_key: str,
+        stems: Optional[List[StemType]] = None,
+    ) -> Optional[SeparatedStems]:
+        """Load separated stems from cache if available and not expired.
+
+        Args:
+            cache_key: The cache key
+            stems: Optional list of required stems
+
+        Returns:
+            SeparatedStems if cache hit, None otherwise
+        """
+        if not self.enable_cache:
+            return None
+
+        cache_path = self._get_cache_path(cache_key)
+
+        if not cache_path.exists():
+            return None
+
+        # Check cache age
+        cache_age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        if cache_age_hours > self.CACHE_TTL_HOURS:
+            # Cache expired
+            cache_path.unlink(missing_ok=True)
+            return None
+
+        try:
+            with open(cache_path, "rb") as f:
+                cached_data = pickle.load(f)
+
+            result = SeparatedStems(
+                stems={
+                    StemType(k): StemAudio(
+                        stem_type=StemType(k),
+                        audio=v["audio"],
+                        sample_rate=v["sample_rate"],
+                        confidence=v.get("confidence", 1.0),
+                    )
+                    for k, v in cached_data["stems"].items()
+                },
+                original_sample_rate=cached_data["original_sample_rate"],
+                model_name=cached_data["model_name"],
+                separation_time=0.0,  # Instant from cache
+            )
+
+            # Check if all requested stems are in cache
+            if stems is not None:
+                for stem in stems:
+                    if stem not in result.stems:
+                        return None  # Missing required stem
+
+            return result
+
+        except (pickle.PickleError, KeyError, IOError):
+            # Cache corrupted, remove it
+            cache_path.unlink(missing_ok=True)
+            return None
+
+    def _save_to_cache(self, cache_key: str, result: SeparatedStems) -> None:
+        """Save separated stems to cache.
+
+        Args:
+            cache_key: The cache key
+            result: The separation result to cache
+        """
+        if not self.enable_cache:
+            return
+
+        cache_path = self._get_cache_path(cache_key)
+
+        try:
+            cache_data = {
+                "stems": {
+                    stem_type.value: {
+                        "audio": stem_audio.audio,
+                        "sample_rate": stem_audio.sample_rate,
+                        "confidence": stem_audio.confidence,
+                    }
+                    for stem_type, stem_audio in result.stems.items()
+                },
+                "original_sample_rate": result.original_sample_rate,
+                "model_name": result.model_name,
+                "timestamp": time.time(),
+            }
+
+            with open(cache_path, "wb") as f:
+                pickle.dump(cache_data, f)
+
+        except (pickle.PickleError, IOError) as e:
+            warnings.warn(f"Failed to save cache: {e}")
+
+    def clear_cache(self, older_than_hours: Optional[float] = None) -> int:
+        """Clear the cache directory.
+
+        Args:
+            older_than_hours: Only clear entries older than this (default: all)
+
+        Returns:
+            Number of cache entries removed
+        """
+        if not self.cache_dir.exists():
+            return 0
+
+        removed = 0
+        current_time = time.time()
+
+        for cache_file in self.cache_dir.glob("stems_*.pkl"):
+            if older_than_hours is not None:
+                file_age_hours = (current_time - cache_file.stat().st_mtime) / 3600
+                if file_age_hours < older_than_hours:
+                    continue
+
+            cache_file.unlink(missing_ok=True)
+            removed += 1
+
+        return removed
+
+    def get_cache_stats(self) -> Dict[str, Union[int, float]]:
+        """Get cache statistics.
+
+        Returns:
+            Dict with cache_entries, total_size_mb, oldest_hours
+        """
+        if not self.cache_dir.exists():
+            return {"cache_entries": 0, "total_size_mb": 0.0, "oldest_hours": 0.0}
+
+        cache_files = list(self.cache_dir.glob("stems_*.pkl"))
+        total_size = sum(f.stat().st_size for f in cache_files)
+
+        oldest_hours = 0.0
+        if cache_files:
+            oldest_time = min(f.stat().st_mtime for f in cache_files)
+            oldest_hours = (time.time() - oldest_time) / 3600
+
+        return {
+            "cache_entries": len(cache_files),
+            "total_size_mb": total_size / (1024 * 1024),
+            "oldest_hours": oldest_hours,
+        }
     
     def _load_model(self):
         """Load Demucs model lazily."""
@@ -280,28 +508,43 @@ class SourceSeparator:
         audio: np.ndarray,
         sample_rate: int,
         stems: Optional[List[StemType]] = None,
+        use_cache: bool = True,
     ) -> SeparatedStems:
         """
         Separate audio into stems.
-        
+
         Args:
             audio: Audio array (mono or stereo)
             sample_rate: Sample rate of the audio
             stems: Which stems to extract (default: all)
-            
+            use_cache: Whether to use disk cache (default: True)
+
         Returns:
             SeparatedStems containing the separated audio
         """
-        import time
         start_time = time.time()
-        
+
+        # Check cache first
+        cache_key = None
+        if use_cache and self.enable_cache:
+            # Flatten audio for consistent hashing
+            audio_flat = audio.flatten() if len(audio.shape) > 1 else audio
+            cache_key = self._get_cache_key(audio_flat, sample_rate)
+            cached = self._load_from_cache(cache_key, stems)
+            if cached is not None:
+                return cached
+
         # Use fallback if Demucs not available
         if not self._demucs_available:
             warnings.warn(
                 "Demucs not available, using frequency-band separation fallback. "
                 "Install demucs for better results."
             )
-            return self._separate_fallback(audio, sample_rate, stems)
+            result = self._separate_fallback(audio, sample_rate, stems)
+            # Cache fallback results too
+            if cache_key is not None:
+                self._save_to_cache(cache_key, result)
+            return result
         
         self._load_model()
         
@@ -401,14 +644,20 @@ class SourceSeparator:
             )
         
         separation_time = time.time() - start_time
-        
-        return SeparatedStems(
+
+        result = SeparatedStems(
             stems=separated_stems,
             original_sample_rate=sample_rate,
             model_name=self.model_name,
             separation_time=separation_time,
         )
-    
+
+        # Save to cache
+        if cache_key is not None:
+            self._save_to_cache(cache_key, result)
+
+        return result
+
     def _separate_fallback(
         self,
         audio: np.ndarray,
