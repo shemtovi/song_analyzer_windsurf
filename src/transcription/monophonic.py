@@ -14,26 +14,29 @@ class MonophonicTranscriber(Transcriber):
     def __init__(
         self,
         hop_length: int = 512,
-        onset_threshold: float = 0.3,
+        onset_threshold: float = 0.4,
         min_note_duration: float = 0.05,
-        pitch_confidence_threshold: float = 0.5,
+        pitch_confidence_threshold: float = 0.65,
         crepe_model: str = "tiny",
+        min_rms_threshold: float = 0.01,
     ):
         """
         Initialize MonophonicTranscriber.
 
         Args:
             hop_length: Samples between analysis frames
-            onset_threshold: Threshold for onset detection
+            onset_threshold: Threshold for onset detection (0.3-0.5, higher = fewer onsets)
             min_note_duration: Minimum note duration in seconds
-            pitch_confidence_threshold: Minimum CREPE confidence
+            pitch_confidence_threshold: Minimum CREPE/pYIN confidence (0.5-0.8)
             crepe_model: CREPE model size ('tiny', 'small', 'medium', 'large', 'full')
+            min_rms_threshold: Minimum RMS energy to consider a segment (filters noise)
         """
         self.hop_length = hop_length
         self.onset_threshold = onset_threshold
         self.min_note_duration = min_note_duration
         self.pitch_confidence_threshold = pitch_confidence_threshold
         self.crepe_model = crepe_model
+        self.min_rms_threshold = min_rms_threshold
 
     def transcribe(self, audio: np.ndarray, sr: int) -> List[Note]:
         """
@@ -166,6 +169,11 @@ class MonophonicTranscriber(Transcriber):
             if end_time - start_time < self.min_note_duration:
                 continue
 
+            # Check RMS energy - skip quiet/noisy segments
+            rms = self._get_segment_rms(audio, sr, start_time, end_time)
+            if rms < self.min_rms_threshold:
+                continue
+
             # Get pitch values in this segment
             mask = (times >= start_time) & (times < end_time)
             segment_freqs = frequencies[mask]
@@ -181,8 +189,12 @@ class MonophonicTranscriber(Transcriber):
 
             confident_freqs = segment_freqs[confident_mask]
 
-            # Use median frequency for the note
-            median_freq = np.median(confident_freqs[confident_freqs > 0])
+            # Use median frequency for the note (robust to outliers)
+            valid_freqs = confident_freqs[confident_freqs > 0]
+            if len(valid_freqs) == 0:
+                continue
+
+            median_freq = np.median(valid_freqs)
 
             if median_freq <= 0 or np.isnan(median_freq):
                 continue
@@ -194,7 +206,7 @@ class MonophonicTranscriber(Transcriber):
             midi_pitch = max(0, min(127, midi_pitch))
 
             # Estimate velocity from RMS energy
-            velocity = self._estimate_velocity(audio, sr, start_time, end_time)
+            velocity = self._rms_to_velocity(rms)
 
             notes.append(
                 Note(
@@ -207,26 +219,26 @@ class MonophonicTranscriber(Transcriber):
 
         return notes
 
-    def _estimate_velocity(
+    def _get_segment_rms(
         self,
         audio: np.ndarray,
         sr: int,
         start_time: float,
         end_time: float,
-    ) -> int:
-        """Estimate MIDI velocity from audio RMS energy."""
+    ) -> float:
+        """Calculate RMS energy for an audio segment."""
         start_sample = int(start_time * sr)
         end_sample = int(end_time * sr)
-
         segment = audio[start_sample:end_sample]
 
         if len(segment) == 0:
-            return 64
+            return 0.0
 
-        rms = np.sqrt(np.mean(segment**2))
+        return float(np.sqrt(np.mean(segment**2)))
 
-        # Map RMS to velocity (0-127)
+    def _rms_to_velocity(self, rms: float) -> int:
+        """Convert RMS energy to MIDI velocity (0-127)."""
+        # Map RMS to velocity range [20, 127]
         # Assuming normalized audio, RMS typically 0.01-0.5
         velocity = int(np.clip(rms * 200, 20, 127))
-
         return velocity
