@@ -36,10 +36,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true  # Show full error output for debugging
-
-          # Workaround for MCP configuration quoting bug
-          # Disable MCP servers to avoid shell quoting issues
-          allowed_tools: "Edit,Glob,Grep,Read,Write,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+          mode: direct  # Try direct mode instead of tag mode to avoid MCP quoting bug
 
           # Optional: Customize the trigger phrase (default: @claude)
           # trigger_phrase: "/claude"
