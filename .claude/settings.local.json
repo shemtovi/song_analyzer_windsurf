@@ -4,7 +4,21 @@
       "Bash(.venv/Scripts/pip.exe install:*)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(pytest:*)",
+      "Bash(python test_rhcp_analysis.py:*)",
+      "Bash(python -m src.cli analyze:*)",
+      "Bash(python -m src.cli transcribe:*)",
+      "Bash(python -c \"\nfrom src.input.loader import AudioLoader\nfrom src.transcription.polyphonic import PolyphonicTranscriber\nfrom src.processing.cleanup import NoteCleanup, CleanupConfig\n\n# Load audio\nloader = AudioLoader\\(\\)\naudio, sr = loader.load\\(''examples/rhcp_fast/Red Hot Chili Peppers - Can''\\\\''''t Stop [Official Music Video]_bass.wav''\\)\n\n# Transcribe with NEW improved settings\ntranscriber = PolyphonicTranscriber\\(\\)\nnotes = transcriber.transcribe\\(audio, sr\\)\n\nprint\\(''=''*70\\)\nprint\\(''RHCP Bass - Improved Analysis Results''\\)\nprint\\(''=''*70\\)\nprint\\(f''Initial transcription: {len\\(notes\\)} notes''\\)\n\n# Cleanup with NEW settings\nconfig = CleanupConfig\\(\\)  # Uses all new defaults\ncleanup = NoteCleanup\\(config=config\\)\ncleaned_notes, stats = cleanup.cleanup\\(notes, return_stats=True\\)\n\nprint\\(f''\\\\nAfter enhanced cleanup: {len\\(cleaned_notes\\)} notes''\\)\nprint\\(f''\\\\nCleanup Statistics:''\\)\nprint\\(f''  Original count: {stats.original_count}''\\)\nprint\\(f''  Final count: {stats.final_count}''\\)\nprint\\(f''  Total removed: {stats.total_removed} \\({stats.total_removed/stats.original_count*100:.1f}%\\)''\\)\nprint\\(f''\\\\nBreakdown:''\\)\nprint\\(f''  Removed ghost notes: {stats.removed_ghost_notes}''\\)\nprint\\(f''  Removed harmonics: {stats.removed_harmonics}''\\)\nprint\\(f''  Removed via adaptive velocity: {stats.removed_adaptive_velocity}''\\)\nprint\\(f''  Removed via density filter: {stats.removed_density}''\\)\nprint\\(f''  Removed duplicates: {stats.removed_duplicates}''\\)\nprint\\(f''  Removed outliers: {stats.removed_outliers}''\\)\nprint\\(f''\\\\nAuto-aggressive mode: {stats.auto_aggressive_enabled}''\\)\nprint\\(f''Notes per second: {stats.detected_notes_per_sec:.2f}''\\)\nprint\\(''=''*70\\)\n\")",
+      "Bash(python -m src.cli info:*)",
+      "Bash(python debug_transcription.py:*)",
+      "Bash(python test_sensitivity.py:*)",
+      "Bash(python -m src.cli:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c:*)",
+      "Bash(dir \"C:\\\\Users\\\\idans\\\\coding_progects\\\\song_analyzer_windsurf\\\\.venv\\\\lib\\\\site-packages\\\\imageio_ffmpeg\\\\binaries\")",
+      "Bash(ls:*)"
     ]
   }
 }

@@ -4,6 +4,7 @@ import numpy as np
 import librosa
 from pathlib import Path
 from typing import Tuple, Optional
+from src.input.youtube import YouTubeDownloader
 
 
 class AudioLoader:
@@ -28,13 +29,14 @@ class AudioLoader:
         self.target_sr = target_sr
         self.mono = mono
         self.normalize = normalize
+        self.youtube_downloader = YouTubeDownloader(output_format="wav")
 
     def load(self, path: str) -> Tuple[np.ndarray, int]:
         """
-        Load audio file and preprocess.
+        Load audio file and preprocess. Supports local files and YouTube URLs.
 
         Args:
-            path: Path to audio file
+            path: Path to audio file or YouTube URL
 
         Returns:
             Tuple of (audio array, sample rate)
@@ -42,8 +44,16 @@ class AudioLoader:
         Raises:
             ValueError: If file format not supported
             FileNotFoundError: If file doesn't exist
+            RuntimeError: If YouTube download fails
         """
-        path = Path(path)
+        # Check if it's a YouTube URL
+        if YouTubeDownloader.is_youtube_url(path):
+            print(f"Detected YouTube URL. Downloading audio...")
+            downloaded_path = self.youtube_downloader.download(path)
+            print(f"Download complete: {downloaded_path}")
+            path = Path(downloaded_path)
+        else:
+            path = Path(path)
 
         if not path.exists():
             raise FileNotFoundError(f"Audio file not found: {path}")
@@ -92,6 +102,10 @@ class AudioLoader:
         return trimmed, indices
 
     def get_duration(self, audio: np.ndarray, sr: Optional[int] = None) -> float:
-        """Get duration in seconds."""
+        """Get duration in seconds. Handles both mono (1D) and stereo (2D) arrays."""
         sr = sr or self.target_sr
+        # For stereo audio (2D array), use the last dimension (samples)
+        # For mono audio (1D array), use the length
+        if audio.ndim > 1:
+            return audio.shape[-1] / sr
         return len(audio) / sr

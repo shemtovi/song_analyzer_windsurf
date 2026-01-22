@@ -72,11 +72,11 @@ class StageTimings:
 def download_audio_from_url(url: str, output_dir: Optional[Path] = None) -> Path:
     """
     Download audio from a URL (YouTube, etc.) using yt-dlp.
-    
+
     Args:
         url: URL to download from (YouTube, SoundCloud, etc.)
         output_dir: Directory to save the file (default: temp directory)
-    
+
     Returns:
         Path to the downloaded audio file
     """
@@ -85,27 +85,35 @@ def download_audio_from_url(url: str, output_dir: Optional[Path] = None) -> Path
     except ImportError:
         console.print("[red]yt-dlp not installed. Run: pip install yt-dlp[/red]")
         raise typer.Exit(1)
+
+    # Get ffmpeg path from imageio-ffmpeg if available
+    ffmpeg_path = None
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        # Check if ffmpeg is available in system PATH
+        import subprocess
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+            ffmpeg_path = 'ffmpeg'
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            console.print("[yellow]Warning: ffmpeg not found. Installing imageio-ffmpeg is recommended for better audio quality.[/yellow]")
+            console.print("[yellow]Run: pip install imageio-ffmpeg[/yellow]\n")
     
     if output_dir is None:
         output_dir = Path(tempfile.mkdtemp(prefix="song_analyzer_"))
     
     output_template = str(output_dir / "%(title)s.%(ext)s")
-    
-    # Try with ffmpeg conversion first, fall back to direct download
-    ydl_opts_with_ffmpeg = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-            'preferredquality': '192',
-        }],
-        'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
-    }
-    
-    # Fallback: download best audio without conversion
-    ydl_opts_no_ffmpeg = {
+
+    # Add ffmpeg to PATH if we found it (helps librosa)
+    if ffmpeg_path:
+        import os
+        ffmpeg_dir = str(Path(ffmpeg_path).parent)
+        os.environ['PATH'] = ffmpeg_dir + os.pathsep + os.environ.get('PATH', '')
+
+    # Download best audio without conversion (we'll convert ourselves if needed)
+    ydl_opts = {
         'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
         'outtmpl': output_template,
         'quiet': True,
@@ -113,26 +121,10 @@ def download_audio_from_url(url: str, output_dir: Optional[Path] = None) -> Path
     }
     
     console.print(f"[cyan]Downloading audio from URL...[/cyan]")
-    
-    # Try with ffmpeg first
+
+    # Download without conversion (simpler, doesn't need ffprobe)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts_with_ffmpeg) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'audio')
-            downloaded_file = output_dir / f"{title}.wav"
-            
-            if downloaded_file.exists():
-                console.print(f"   Downloaded: {downloaded_file.name}")
-                return downloaded_file
-    except Exception as e:
-        if "ffmpeg" in str(e).lower() or "ffprobe" in str(e).lower():
-            console.print("   [yellow]FFmpeg not found, downloading without conversion...[/yellow]")
-        else:
-            pass  # Try fallback
-    
-    # Fallback: download without conversion
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts_no_ffmpeg) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'audio')
             
@@ -147,22 +139,33 @@ def download_audio_from_url(url: str, output_dir: Optional[Path] = None) -> Path
             
             downloaded_file = audio_files[0]
             console.print(f"   Downloaded: {downloaded_file.name}")
-            
-            # Convert to WAV if needed (librosa needs wav/mp3)
-            if downloaded_file.suffix.lower() not in ['.wav', '.mp3']:
+
+            # Convert to WAV using ffmpeg for best compatibility
+            if downloaded_file.suffix.lower() != '.wav' and ffmpeg_path:
                 console.print("   [yellow]Converting to WAV format...[/yellow]")
                 wav_file = downloaded_file.with_suffix('.wav')
                 try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_file(str(downloaded_file))
-                    audio.export(str(wav_file), format='wav')
+                    # Use ffmpeg directly via subprocess
+                    import subprocess
+                    result = subprocess.run(
+                        [
+                            ffmpeg_path,
+                            '-i', str(downloaded_file),
+                            '-acodec', 'pcm_s16le',
+                            '-ar', '44100',
+                            '-y',  # Overwrite output file
+                            str(wav_file)
+                        ],
+                        capture_output=True,
+                        check=True
+                    )
                     downloaded_file = wav_file
                     console.print(f"   Converted to: {wav_file.name}")
                 except Exception as conv_e:
-                    console.print(f"[red]Conversion failed: {conv_e}[/red]")
-                    console.print("[yellow]Please install ffmpeg for audio conversion.[/yellow]")
-                    raise typer.Exit(1)
-            
+                    console.print(f"[yellow]Warning: Conversion to WAV failed: {conv_e}[/yellow]")
+                    console.print(f"[yellow]Will try to load {downloaded_file.suffix} directly[/yellow]")
+                    # Return the original file and hope librosa can handle it
+
             return downloaded_file
             
     except typer.Exit:
@@ -174,7 +177,7 @@ def download_audio_from_url(url: str, output_dir: Optional[Path] = None) -> Path
 
 @app.command()
 def transcribe(
-    input_file: Path = typer.Argument(..., help="Input audio file (WAV, MP3, etc.)"),
+    input_file: Path = typer.Argument(..., help="Input audio file, WAV, MP3, or URL"),
     output: Optional[Path] = typer.Option(
         None, "-o", "--output", help="Output MIDI file path"
     ),
@@ -202,11 +205,17 @@ def transcribe(
     max_notes_per_frame: int = typer.Option(
         0, "--max-notes", help="Maximum simultaneous notes (0 = unlimited)"
     ),
+    sensitivity: str = typer.Option(
+        "medium", "--sensitivity", "-s", help="Transcription sensitivity: low/medium/high/ultra"
+    ),
+    normalize: bool = typer.Option(
+        False, "--normalize", help="Normalize audio before transcription"
+    ),
     json_output: bool = typer.Option(
         False, "--json", help="Output results as JSON (for scripting)"
     ),
 ):
-    """Transcribe audio file to MIDI.
+    """Transcribe audio file to MIDI. Supports local files and YouTube URLs.
 
     **Examples:**
 
@@ -214,7 +223,7 @@ def transcribe(
 
         song-analyzer transcribe song.mp3 -o output.mid -p
 
-        song-analyzer transcribe song.wav --aggressive --max-notes 8
+        song-analyzer transcribe "https://youtube.com/watch?v=..." -o output.mid
     """
     from .input import AudioLoader
     from .transcription import MonophonicTranscriber, PolyphonicTranscriber
@@ -223,8 +232,20 @@ def transcribe(
     from .processing import Quantizer, NoteCleanup, CleanupConfig
     from .output import MIDIExporter
 
-    # Validate input
-    if not input_file.exists():
+    # Validate input and handle URLs
+    temp_dir = None
+    input_str = str(input_file)
+    # Handle both forward slashes and Windows backslashes in URLs
+    if input_str.startswith(("http://", "https://", "http:\\", "https:\\", "www.")):
+        # Normalize Windows path separators back to URL format
+        # Replace the protocol part first, then the rest
+        if input_str.startswith(("http:\\", "https:\\")):
+            input_str = input_str.replace(":\\", "://", 1).replace("\\", "/")
+        else:
+            input_str = input_str.replace("\\", "/")
+        temp_dir = Path(tempfile.mkdtemp(prefix="song_analyzer_"))
+        input_file = download_audio_from_url(input_str, temp_dir)
+    elif not input_file.exists():
         console.print(f"[red]Error: File not found: {input_file}[/red]")
         raise typer.Exit(1)
 
@@ -232,120 +253,168 @@ def transcribe(
     if output is None:
         output = input_file.with_suffix(".mid")
 
-    console.print(f"[blue]Loading audio:[/blue] {input_file}")
+    try:
+        console.print(f"[blue]Loading audio:[/blue] {input_file}")
 
-    # Load audio
-    loader = AudioLoader(target_sr=22050)
-    audio, sr = loader.load(str(input_file))
-    duration = loader.get_duration(audio, sr)
+        # Load audio
+        loader = AudioLoader(target_sr=22050)
+        audio, sr = loader.load(str(input_file))
+        duration = loader.get_duration(audio, sr)
 
-    if verbose:
-        console.print(f"  Duration: {duration:.2f}s, Sample rate: {sr}Hz")
+        if verbose:
+            console.print(f"  Duration: {duration:.2f}s, Sample rate: {sr}Hz")
 
-    # Detect tempo if not provided
-    if tempo <= 0:
-        console.print("[blue]Detecting tempo...[/blue]")
-        tempo_analyzer = TempoAnalyzer()
-        detected_tempo, beats = tempo_analyzer.detect(audio, sr)
+        # Detect tempo if not provided
+        if tempo <= 0:
+            console.print("[blue]Detecting tempo...[/blue]")
+            tempo_analyzer = TempoAnalyzer()
+            detected_tempo, beats = tempo_analyzer.detect(audio, sr)
 
-        # Some signals (e.g., a single sustained sine tone) may not
-        # produce reliable beat tracking and can return tempo == 0.
-        # In that case, fall back to a sensible default (120 BPM)
-        # so that quantization still works.
-        if detected_tempo is None or (isinstance(detected_tempo, (int, float)) and detected_tempo <= 0):
-            tempo = 120.0
-            console.print(
-                "  [yellow]Tempo detection failed; using default 120.0 BPM[/yellow]"
-            )
-        else:
-            tempo = float(detected_tempo)
-            console.print(f"  Detected tempo: {tempo:.1f} BPM")
+            # Some signals (e.g., a single sustained sine tone) may not
+            # produce reliable beat tracking and can return tempo == 0.
+            # In that case, fall back to a sensible default (120 BPM)
+            # so that quantization still works.
+            if detected_tempo is None or (isinstance(detected_tempo, (int, float)) and detected_tempo <= 0):
+                tempo = 120.0
+                console.print(
+                    "  [yellow]Tempo detection failed; using default 120.0 BPM[/yellow]"
+                )
+            else:
+                tempo = float(detected_tempo)
+                console.print(f"  Detected tempo: {tempo:.1f} BPM")
 
-    # Transcribe
-    if polyphonic:
-        console.print("[blue]Transcribing (polyphonic mode)...[/blue]")
-        transcriber = PolyphonicTranscriber(device="cpu")
-        if transcriber.is_neural:
-            console.print("  Using neural network (Onsets and Frames)")
-        else:
-            console.print("  Using CQT-based multi-pitch detection")
-    else:
-        console.print("[blue]Transcribing (monophonic mode)...[/blue]")
-        transcriber = MonophonicTranscriber()
+        # Transcribe
+        if polyphonic:
+            console.print("[blue]Transcribing (polyphonic mode)...[/blue]")
 
-    notes = transcriber.transcribe(audio, sr)
-    console.print(f"  Detected {len(notes)} notes")
-
-    # Post-process
-    if quantize:
-        console.print("[blue]Quantizing...[/blue]")
-        quantizer = Quantizer(tempo=tempo)
-        notes = quantizer.quantize(notes)
-
-    # Cleanup
-    console.print("[blue]Cleaning up notes...[/blue]")
-    cleanup_config = CleanupConfig(
-        min_velocity=min_velocity,
-        min_duration=min_duration,
-        enable_all=aggressive_cleanup,
-    )
-    cleaner = NoteCleanup(config=cleanup_config)
-
-    if aggressive_cleanup:
-        notes, stats = cleaner.cleanup_aggressive(notes, return_stats=True)
-        console.print(f"  Removed: {stats.removed_ghost_notes} ghost, {stats.removed_harmonics} harmonics, {stats.removed_duplicates} duplicates, {stats.removed_outliers} outliers")
-    else:
-        notes = cleaner.cleanup(notes)
-
-    # Limit notes per frame if requested
-    if max_notes_per_frame > 0:
-        before_count = len(notes)
-        notes = cleaner.limit_notes_per_frame(notes, max_notes=max_notes_per_frame)
-        console.print(f"  Limited to {max_notes_per_frame} notes/frame: {before_count} -> {len(notes)}")
-
-    console.print(f"  After cleanup: {len(notes)} notes")
-
-    # Detect key
-    key_info_dict = None
-    if verbose or json_output:
-        key_detector = KeyDetector()
-        key, mode, confidence = key_detector.detect_from_notes(notes)
-        key_info_dict = {"key": key, "mode": mode, "confidence": confidence}
-        if not json_output:
-            console.print(f"  Detected key: {key} {mode} (confidence: {confidence:.2f})")
-
-    # Export
-    if not json_output:
-        console.print(f"[blue]Exporting to:[/blue] {output}")
-    exporter = MIDIExporter(tempo=tempo)
-    exporter.export(notes, str(output))
-
-    if not json_output:
-        console.print(f"[green]Transcription complete![/green]")
-
-    # JSON output mode
-    if json_output:
-        result = {
-            "input": str(input_file),
-            "output": str(output),
-            "notes_count": len(notes),
-            "tempo": tempo,
-            "duration": duration,
-            "polyphonic": polyphonic,
-        }
-        if key_info_dict:
-            result["key"] = key_info_dict
-        if aggressive_cleanup:
-            result["cleanup_stats"] = {
-                "ghost_notes_removed": stats.removed_ghost_notes,
-                "harmonics_removed": stats.removed_harmonics,
-                "duplicates_removed": stats.removed_duplicates,
-                "outliers_removed": stats.removed_outliers,
+            # Configure sensitivity
+            sensitivity_configs = {
+                "low": {
+                    "min_peak_energy": 0.05,
+                    "min_rms_threshold": 0.002,
+                    "spectral_flatness_threshold": 0.90,
+                },
+                "medium": {
+                    "min_peak_energy": 0.03,
+                    "min_rms_threshold": 0.001,
+                    "spectral_flatness_threshold": 0.95,
+                },
+                "high": {
+                    "min_peak_energy": 0.02,
+                    "min_rms_threshold": 0.0005,
+                    "spectral_flatness_threshold": 0.97,
+                },
+                "ultra": {
+                    "min_peak_energy": 0.01,
+                    "min_rms_threshold": 0.0001,
+                    "spectral_flatness_threshold": 0.99,
+                },
             }
-        console.print_json(data=result)
-    elif verbose and notes:
-        # Show note summary
-        _show_notes_table(notes)
+
+            sensitivity_lower = sensitivity.lower()
+            if sensitivity_lower not in sensitivity_configs:
+                console.print(f"[yellow]Unknown sensitivity '{sensitivity}', using 'medium'[/yellow]")
+                sensitivity_lower = "medium"
+
+            config = sensitivity_configs[sensitivity_lower]
+            console.print(f"  Sensitivity: {sensitivity_lower}")
+
+            transcriber = PolyphonicTranscriber(
+                device="cpu",
+                normalize_audio=normalize,
+                use_adaptive_thresholds=True,
+                **config,
+            )
+
+            if transcriber.is_neural:
+                console.print("  Using neural network (Onsets and Frames)")
+            else:
+                console.print("  Using CQT-based multi-pitch detection")
+
+            if normalize:
+                console.print("  Audio normalization: enabled")
+        else:
+            console.print("[blue]Transcribing (monophonic mode)...[/blue]")
+            transcriber = MonophonicTranscriber()
+
+        notes = transcriber.transcribe(audio, sr)
+        console.print(f"  Detected {len(notes)} notes")
+
+        # Post-process
+        if quantize:
+            console.print("[blue]Quantizing...[/blue]")
+            quantizer = Quantizer(tempo=tempo)
+            notes = quantizer.quantize(notes)
+
+        # Cleanup
+        console.print("[blue]Cleaning up notes...[/blue]")
+        cleanup_config = CleanupConfig(
+            min_velocity=min_velocity,
+            min_duration=min_duration,
+            enable_all=aggressive_cleanup,
+        )
+        cleaner = NoteCleanup(config=cleanup_config)
+
+        if aggressive_cleanup:
+            notes, stats = cleaner.cleanup_aggressive(notes, return_stats=True)
+            console.print(f"  Removed: {stats.removed_ghost_notes} ghost, {stats.removed_harmonics} harmonics, {stats.removed_duplicates} duplicates, {stats.removed_outliers} outliers")
+        else:
+            notes = cleaner.cleanup(notes)
+
+        # Limit notes per frame if requested
+        if max_notes_per_frame > 0:
+            before_count = len(notes)
+            notes = cleaner.limit_notes_per_frame(notes, max_notes=max_notes_per_frame)
+            console.print(f"  Limited to {max_notes_per_frame} notes/frame: {before_count} -> {len(notes)}")
+
+        console.print(f"  After cleanup: {len(notes)} notes")
+
+        # Detect key
+        key_info_dict = None
+        if verbose or json_output:
+            key_detector = KeyDetector()
+            key, mode, confidence = key_detector.detect_from_notes(notes)
+            key_info_dict = {"key": key, "mode": mode, "confidence": confidence}
+            if not json_output:
+                console.print(f"  Detected key: {key} {mode} (confidence: {confidence:.2f})")
+
+        # Export
+        if not json_output:
+            console.print(f"[blue]Exporting to:[/blue] {output}")
+        exporter = MIDIExporter(tempo=tempo)
+        exporter.export(notes, str(output))
+
+        if not json_output:
+            console.print(f"[green]Transcription complete![/green]")
+
+        # JSON output mode
+        if json_output:
+            result = {
+                "input": str(input_file),
+                "output": str(output),
+                "notes_count": len(notes),
+                "tempo": tempo,
+                "duration": duration,
+                "polyphonic": polyphonic,
+            }
+            if key_info_dict:
+                result["key"] = key_info_dict
+            if aggressive_cleanup:
+                result["cleanup_stats"] = {
+                    "ghost_notes_removed": stats.removed_ghost_notes,
+                    "harmonics_removed": stats.removed_harmonics,
+                    "duplicates_removed": stats.removed_duplicates,
+                    "outliers_removed": stats.removed_outliers,
+                }
+            console.print_json(data=result)
+        elif verbose and notes:
+            # Show note summary
+            _show_notes_table(notes)
+
+    finally:
+        # Cleanup temp directory if URL was used
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @app.command()
@@ -387,9 +456,22 @@ def analyze(
     elif input_file is None:
         console.print("[red]Error: Provide either an input file or --url[/red]")
         raise typer.Exit(1)
-    elif not input_file.exists():
-        console.print(f"[red]Error: File not found: {input_file}[/red]")
-        raise typer.Exit(1)
+    else:
+        # Check if input_file is actually a URL (auto-detect)
+        input_str = str(input_file)
+        # Handle both forward slashes and Windows backslashes in URLs
+        if input_str.startswith(("http://", "https://", "http:\\", "https:\\", "www.")):
+            # Normalize Windows path separators back to URL format
+            # Replace the protocol part first, then the rest
+            if input_str.startswith(("http:\\", "https:\\")):
+                input_str = input_str.replace(":\\", "://", 1).replace("\\", "/")
+            else:
+                input_str = input_str.replace("\\", "/")
+            temp_dir = Path(tempfile.mkdtemp(prefix="song_analyzer_"))
+            input_file = download_audio_from_url(input_str, temp_dir)
+        elif not input_file.exists():
+            console.print(f"[red]Error: File not found: {input_file}[/red]")
+            raise typer.Exit(1)
 
     try:
         console.print(f"\n[bold blue]Full Analysis: {input_file.name}[/bold blue]\n")
@@ -458,7 +540,7 @@ def analyze(
         console.print(f"   Average tension: {harmony.average_tension:.2f}")
         console.print(f"   Musical coherence: {harmony.musical_coherence:.2f}")
 
-        console.print("\n[green]✓ Analysis complete![/green]")
+        console.print("\n[green][OK] Analysis complete![/green]")
         
         if keep_download and temp_dir:
             console.print(f"   [dim]Downloaded file saved at: {input_file}[/dim]")
@@ -471,29 +553,17 @@ def analyze(
 
 @app.command()
 def separate(
-    input_file: Optional[Path] = typer.Argument(None, help="Input audio file"),
-    url: Optional[str] = typer.Option(
-        None, "--url", "-u", help="URL to download audio from (YouTube, etc.)"
-    ),
+    input_file: Optional[Path] = typer.Argument(None, help="Input audio file or YouTube URL"),
     output_dir: Optional[Path] = typer.Option(
-        None, "-o", "--output", help="Output directory for stems and MIDI"
+        None, "-o", "--output", help="Output directory for stem audio files"
     ),
     stems: Optional[str] = typer.Option(
         None, "--stems", "-s",
-        help="Comma-separated stems to analyze (e.g., 'bass,guitar,vocals'). Default: all"
+        help="Comma-separated stems to extract (e.g., 'bass,guitar,vocals'). Default: all"
     ),
     model: str = typer.Option(
         "htdemucs", "--model", "-m",
         help="Demucs model: htdemucs (4-stem), htdemucs_6s (6-stem with guitar/piano)"
-    ),
-    transcribe_stems: bool = typer.Option(
-        True, "--transcribe/--no-transcribe", help="Transcribe each stem to MIDI"
-    ),
-    save_stems: bool = typer.Option(
-        True, "--save-stems/--no-save-stems", help="Save separated audio stems"
-    ),
-    skip_drums: bool = typer.Option(
-        False, "--skip-drums", help="Skip drum transcription"
     ),
     keep_download: bool = typer.Option(
         False, "--keep", "-k", help="Keep downloaded audio file"
@@ -505,39 +575,49 @@ def separate(
         False, "-v", "--verbose", help="Verbose output"
     ),
 ):
-    """Multi-instrument transcription using source separation.
+    """Separate audio into individual instrument stems.
 
-    Separates audio into stems using Demucs:
+    Uses Demucs neural network to separate audio into stems:
     - htdemucs: 4 stems (drums, bass, vocals, other)
     - htdemucs_6s: 6 stems (drums, bass, vocals, guitar, piano, other)
-    
+
+    This command ONLY does separation - no transcription or MIDI export.
+    Use 'transcribe' command on the output stems to generate MIDI files.
+
     Examples:
         song-analyzer separate audio.wav
-        song-analyzer separate --stems bass,guitar audio.wav  # Only bass and guitar
-        song-analyzer separate --model htdemucs_6s --stems guitar audio.wav
-        song-analyzer separate --url "https://youtube.com/watch?v=..." -o output/
+        song-analyzer separate audio.wav -o output/
+        song-analyzer separate --stems bass,vocals audio.wav
+        song-analyzer separate --model htdemucs_6s audio.wav
+        song-analyzer separate "https://youtube.com/watch?v=..." -o output/
     """
     from .input import AudioLoader
-    from .transcription import MultiInstrumentTranscriber
-    from .separation import StemType
-    from .output import MIDIExporter
-    from .analysis import TempoAnalyzer
+    from .separation import SourceSeparator, StemType
 
     # Determine input source
     temp_dir = None
-    if url:
-        temp_dir = Path(tempfile.mkdtemp(prefix="song_analyzer_"))
-        input_file = download_audio_from_url(url, temp_dir)
-    elif input_file is None:
-        console.print("[red]Error: Provide either an input file or --url[/red]")
+    if input_file is None:
+        console.print("[red]Error: Provide an input audio file or YouTube URL[/red]")
         raise typer.Exit(1)
+
+    # Check if input_file is actually a URL (auto-detect)
+    input_str = str(input_file)
+    # Handle both forward slashes and Windows backslashes in URLs
+    if input_str.startswith(("http://", "https://", "http:\\", "https:\\", "www.")):
+        # Normalize Windows path separators back to URL format
+        if input_str.startswith(("http:\\", "https:\\")):
+            input_str = input_str.replace(":\\", "://", 1).replace("\\", "/")
+        else:
+            input_str = input_str.replace("\\", "/")
+        temp_dir = Path(tempfile.mkdtemp(prefix="song_analyzer_"))
+        input_file = download_audio_from_url(input_str, temp_dir)
     elif not input_file.exists():
         console.print(f"[red]Error: File not found: {input_file}[/red]")
         raise typer.Exit(1)
 
     # Set up output directory
     if output_dir is None:
-        output_dir = input_file.parent / f"{input_file.stem}_separated"
+        output_dir = input_file.parent / f"{input_file.stem}_stems"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse stems option
@@ -554,17 +634,17 @@ def separate(
                     selected_stems.append(StemType(name))
                 except ValueError:
                     pass
-        
+
         # Auto-select 6-stem model if guitar/piano requested
         if any(s in stem_names for s in ["guitar", "piano"]) and model == "htdemucs":
             model = "htdemucs_6s"
             console.print("[cyan]Auto-selecting htdemucs_6s model for guitar/piano separation[/cyan]")
 
     try:
-        console.print(f"\n[bold blue]Multi-Instrument Transcription: {input_file.name}[/bold blue]\n")
-        
+        console.print(f"\n[bold blue]Audio Stem Separation: {input_file.name}[/bold blue]\n")
+
         if selected_stems:
-            console.print(f"[cyan]Analyzing stems: {', '.join(s.value for s in selected_stems)}[/cyan]\n")
+            console.print(f"[cyan]Extracting stems: {', '.join(s.value for s in selected_stems)}[/cyan]\n")
 
         # Load audio (stereo for Demucs separation)
         console.print("[cyan]1. Loading audio...[/cyan]")
@@ -572,85 +652,71 @@ def separate(
         audio, sr = loader.load(str(input_file))
         duration = loader.get_duration(audio, sr)
         console.print(f"   Duration: {duration:.2f}s")
+        console.print(f"   Sample rate: {sr} Hz")
+        console.print(f"   Channels: {'Stereo' if len(audio.shape) > 1 else 'Mono'}")
 
-        # Initialize transcriber
+        # Initialize separator
         console.print("\n[cyan]2. Initializing source separator...[/cyan]")
-        transcriber = MultiInstrumentTranscriber(
-            demucs_model=model,
+        separator = SourceSeparator(
+            model_name=model,
             device="auto",
-            skip_drums=skip_drums,
             enable_cache=not no_cache,
         )
 
         if verbose and not no_cache:
-            cache_stats = transcriber.separator.get_cache_stats()
+            cache_stats = separator.get_cache_stats()
             if cache_stats["cache_entries"] > 0:
                 console.print(f"   Cache: {cache_stats['cache_entries']} entries, {cache_stats['total_size_mb']:.1f}MB")
-        
-        if not transcriber.is_available:
+
+        if not separator.is_available:
             console.print("   [yellow]Demucs not available, using fallback separation[/yellow]")
             console.print("   [dim]Install demucs for better results: pip install demucs torch torchaudio[/dim]")
         else:
             model_desc = "6-stem (guitar/piano)" if model == "htdemucs_6s" else "4-stem"
             console.print(f"   Using Demucs ({model} - {model_desc})")
 
-        # Perform separation and transcription
+        # Perform separation
         console.print("\n[cyan]3. Separating into stems...[/cyan]")
-        result = transcriber.transcribe_multi(audio, sr, stems_to_process=selected_stems)
-        
-        console.print(f"   Separation time: {result.separation_time:.1f}s")
-        console.print(f"   Active stems: {len(result.active_stems)}")
 
-        # Display results
-        console.print("\n[cyan]4. Transcription Results:[/cyan]")
-        _show_stems_table(result)
+        import time
+        start_time = time.time()
+        separated = separator.separate(audio, sr)
+        separation_time = time.time() - start_time
 
-        # Save stems if requested
-        if save_stems:
-            console.print("\n[cyan]5. Saving stems...[/cyan]")
-            separated = transcriber.separator.separate(audio, sr)
-            
-            import soundfile as sf
-            for stem_type, stem_audio in separated.stems.items():
-                stem_path = output_dir / f"{input_file.stem}_{stem_type.value}.wav"
-                sf.write(str(stem_path), stem_audio.audio, stem_audio.sample_rate)
-                console.print(f"   Saved: {stem_path.name}")
+        console.print(f"   Separation time: {separation_time:.1f}s")
+        console.print(f"   Extracted stems: {len(separated.stems)}")
 
-        # Export MIDI for each stem
-        if transcribe_stems:
-            console.print("\n[cyan]6. Exporting MIDI...[/cyan]")
-            
-            # Detect tempo for quantization (needs mono audio)
-            tempo_analyzer = TempoAnalyzer()
-            audio_mono = audio.mean(axis=0) if len(audio.shape) > 1 else audio
-            detected_tempo, _ = tempo_analyzer.detect(audio_mono, sr)
-            tempo = float(detected_tempo) if detected_tempo and detected_tempo > 0 else 120.0
-            
-            exporter = MIDIExporter(tempo=tempo)
-            
-            for stem_type, stem_trans in result.stems.items():
-                if stem_trans.note_count == 0:
-                    continue
-                    
-                midi_path = output_dir / f"{input_file.stem}_{stem_type.value}.mid"
-                exporter.export(stem_trans.notes, str(midi_path))
-                console.print(f"   Saved: {midi_path.name} ({stem_trans.note_count} notes)")
-            
-            # Also export combined MIDI
-            all_notes = result.get_all_notes()
-            if all_notes:
-                combined_path = output_dir / f"{input_file.stem}_combined.mid"
-                exporter.export(all_notes, str(combined_path))
-                console.print(f"   Saved: {combined_path.name} ({len(all_notes)} total notes)")
+        # Save stems
+        console.print("\n[cyan]4. Saving stems...[/cyan]")
+        import soundfile as sf
+
+        saved_count = 0
+        for stem_type, stem_audio in separated.stems.items():
+            # Skip if user requested specific stems and this isn't one of them
+            if selected_stems and stem_type not in selected_stems:
+                continue
+
+            stem_path = output_dir / f"{input_file.stem}_{stem_type.value}.wav"
+            sf.write(str(stem_path), stem_audio.audio, stem_audio.sample_rate)
+
+            # Get audio stats
+            max_amplitude = abs(stem_audio.audio).max()
+            console.print(f"   Saved: {stem_path.name} (peak: {max_amplitude:.3f})")
+            saved_count += 1
 
         # Summary
-        console.print(f"\n[green]✓ Multi-instrument transcription complete![/green]")
+        console.print(f"\n[green][OK] Stem separation complete![/green]")
         console.print(f"   Output directory: {output_dir}")
-        console.print(f"   Total notes: {result.total_notes}")
-        console.print(f"   Processing time: {result.total_time:.1f}s")
-        
+        console.print(f"   Saved {saved_count} stem(s)")
+        console.print(f"   Processing time: {separation_time:.1f}s")
+
+        # Show next steps
+        console.print("\n[dim]Next steps:[/dim]")
+        console.print(f"[dim]  Transcribe stems: song-analyzer transcribe {output_dir}/<stem>.wav -o output.mid[/dim]")
+        console.print(f"[dim]  Analyze music: song-analyzer analyze {input_file}[/dim]")
+
         if keep_download and temp_dir:
-            console.print(f"   [dim]Downloaded file: {input_file}[/dim]")
+            console.print(f"\n   [dim]Downloaded file: {input_file}[/dim]")
 
     finally:
         if temp_dir and not keep_download:

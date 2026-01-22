@@ -21,13 +21,16 @@ class PolyphonicTranscriber(Transcriber):
 
     def __init__(
         self,
-        onset_threshold: float = 0.4,
-        frame_threshold: float = 0.2,
+        onset_threshold: float = 0.3,
+        frame_threshold: float = 0.1,
         min_note_duration: float = 0.05,
         device: str = "cpu",
-        min_peak_energy: float = 0.15,
-        min_rms_threshold: float = 0.01,
-        max_notes_per_segment: int = 8,
+        min_peak_energy: float = 0.03,
+        min_rms_threshold: float = 0.001,
+        max_notes_per_segment: int = 15,
+        spectral_flatness_threshold: float = 0.95,
+        use_adaptive_thresholds: bool = True,
+        normalize_audio: bool = False,
     ):
         """
         Initialize PolyphonicTranscriber.
@@ -37,9 +40,12 @@ class PolyphonicTranscriber(Transcriber):
             frame_threshold: Threshold for frame-level detection (0-1, higher = fewer notes)
             min_note_duration: Minimum note duration in seconds
             device: Device for inference ('cpu' or 'cuda')
-            min_peak_energy: Minimum CQT peak energy (0-1) to consider as note
-            min_rms_threshold: Minimum RMS energy to process segment (filters noise)
+            min_peak_energy: Minimum CQT peak energy (0-1) to consider as note (default: 0.03 = 3%)
+            min_rms_threshold: Minimum RMS energy to process segment (default: 0.001)
             max_notes_per_segment: Maximum notes per segment (prevents noise explosion)
+            spectral_flatness_threshold: Threshold for noise detection (0-1, higher = more permissive, default: 0.95)
+            use_adaptive_thresholds: Calculate thresholds based on audio characteristics
+            normalize_audio: Normalize audio before transcription
         """
         self.onset_threshold = onset_threshold
         self.frame_threshold = frame_threshold
@@ -48,6 +54,9 @@ class PolyphonicTranscriber(Transcriber):
         self.min_peak_energy = min_peak_energy
         self.min_rms_threshold = min_rms_threshold
         self.max_notes_per_segment = max_notes_per_segment
+        self.spectral_flatness_threshold = spectral_flatness_threshold
+        self.use_adaptive_thresholds = use_adaptive_thresholds
+        self.normalize_audio = normalize_audio
         self._transcriptor = None
         self._use_neural = self._check_neural_available()
 
@@ -95,15 +104,69 @@ class PolyphonicTranscriber(Transcriber):
         Returns:
             List of detected notes with pitch, onset, offset, velocity
         """
+        # Normalize audio if requested
+        if self.normalize_audio:
+            audio = self._normalize_audio(audio)
+
+        # Calculate adaptive thresholds if enabled
+        if self.use_adaptive_thresholds:
+            self._calculate_adaptive_thresholds(audio)
+
         # Try to initialize neural transcriptor (may fall back to CQT)
         if self._use_neural:
             self._init_neural_transcriptor()
-        
+
         # Check again after init attempt (may have fallen back)
         if self._use_neural and self._transcriptor is not None:
             return self._transcribe_neural(audio, sr)
         else:
             return self._transcribe_cqt(audio, sr)
+
+    def _normalize_audio(self, audio: np.ndarray, target_rms: float = 0.1) -> np.ndarray:
+        """
+        Normalize audio to target RMS level.
+
+        Args:
+            audio: Audio array
+            target_rms: Target RMS level (default: 0.1)
+
+        Returns:
+            Normalized audio
+        """
+        current_rms = np.sqrt(np.mean(audio**2))
+        if current_rms < 1e-6:
+            return audio
+
+        scale = target_rms / current_rms
+        normalized = audio * scale
+
+        # Prevent clipping
+        max_val = np.max(np.abs(normalized))
+        if max_val > 1.0:
+            normalized = normalized / max_val * 0.95
+
+        return normalized
+
+    def _calculate_adaptive_thresholds(self, audio: np.ndarray) -> None:
+        """
+        Calculate adaptive thresholds based on audio characteristics.
+
+        Updates min_rms_threshold and min_peak_energy based on the audio.
+
+        Args:
+            audio: Audio array
+        """
+        # Calculate audio RMS
+        audio_rms = np.sqrt(np.mean(audio**2))
+
+        # Adaptive RMS threshold: 5% of audio RMS, with minimum
+        if audio_rms > 0:
+            adaptive_rms = max(0.0005, audio_rms * 0.05)
+            self.min_rms_threshold = min(self.min_rms_threshold, adaptive_rms)
+
+        # Adaptive peak energy: will be calculated from CQT later
+        # For now, make it more permissive
+        self.min_peak_energy = min(self.min_peak_energy, 0.05)
 
     def _transcribe_neural(self, audio: np.ndarray, sr: int) -> List[Note]:
         """
@@ -195,8 +258,7 @@ class PolyphonicTranscriber(Transcriber):
             spectral_flux[i] = np.sum(np.maximum(diff, 0))
 
         # Find peaks in spectral flux (these are onset candidates)
-        # Increased threshold: mean + 1.5*std (was mean + std)
-        flux_threshold = np.mean(spectral_flux) + 1.5 * np.std(spectral_flux)
+        flux_threshold = np.mean(spectral_flux) + 1.0 * np.std(spectral_flux)
         flux_peaks, _ = find_peaks(
             spectral_flux,
             height=flux_threshold,
@@ -250,20 +312,20 @@ class PolyphonicTranscriber(Transcriber):
 
             # Check spectral flatness - high flatness indicates noise
             spectral_flatness = self._compute_spectral_flatness(segment_energy)
-            if spectral_flatness > 0.8:
+            if spectral_flatness > self.spectral_flatness_threshold:
                 continue  # Skip noise-like segments
 
-            # Find peaks with stricter thresholds
+            # Find peaks in spectrum
             peaks, properties = find_peaks(
                 segment_energy,
-                height=max(max_energy * 0.4, self.min_peak_energy),  # Increased from 0.3
+                height=max(max_energy * 0.3, self.min_peak_energy),
                 distance=2,
-                prominence=0.08,  # Increased from 0.05
+                prominence=0.05,
             )
 
             if len(peaks) == 0:
-                # Fallback: only take bins with very high energy
-                active_bins = np.where(segment_energy > max_energy * 0.6)[0]
+                # Fallback: take bins with moderate energy
+                active_bins = np.where(segment_energy > max_energy * 0.5)[0]
             else:
                 active_bins = peaks
 

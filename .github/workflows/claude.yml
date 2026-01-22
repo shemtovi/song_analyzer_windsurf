@@ -35,6 +35,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true  # Show full error output for debugging
+          mode: direct  # Try direct mode instead of tag mode to avoid MCP quoting bug
 
           # Optional: Customize the trigger phrase (default: @claude)
           # trigger_phrase: "/claude"
