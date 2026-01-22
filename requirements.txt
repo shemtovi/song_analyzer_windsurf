@@ -21,6 +21,7 @@ rich>=13.0.0
 
 # Audio downloading (YouTube, etc.)
 yt-dlp>=2024.1.0
+imageio-ffmpeg>=0.5.0  # Includes ffmpeg binary for audio processing
 
 # Development (useful but optional; keep installed if you run tests / formatters)
 pytest>=7.4.0

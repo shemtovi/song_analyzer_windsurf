@@ -26,14 +26,30 @@ python -m src.cli transcribe input.wav -p -o output.mid
 # Full analysis (key, chords, harmony)
 python -m src.cli analyze audio.wav
 
-# Multi-instrument separation
-python -m src.cli separate audio.wav -o output_dir/
-
-# Analyze from YouTube URL
-python -m src.cli analyze --url "https://youtube.com/watch?v=..."
-
 # Audio file info
 python -m src.cli info audio.wav
+
+# YouTube support - works with all commands
+python -m src.cli transcribe "https://youtube.com/watch?v=..." -o output.mid
+python -m src.cli analyze "https://youtube.com/watch?v=..."
+```
+
+## Multi-Instrument Workflow
+
+Separate audio into individual instrument stems, then transcribe each:
+
+```bash
+# Step 1: Separate audio into stems (drums, bass, vocals, other)
+python -m src.cli separate audio.wav -o stems/
+
+# Step 2: Transcribe each stem to MIDI
+python -m src.cli transcribe stems/audio_drums.wav -o drums.mid -p
+python -m src.cli transcribe stems/audio_bass.wav -o bass.mid
+python -m src.cli transcribe stems/audio_vocals.wav -o vocals.mid
+python -m src.cli transcribe stems/audio_other.wav -o guitar.mid -p
+
+# Or use 6-stem model for guitar/piano separation
+python -m src.cli separate audio.wav --model htdemucs_6s -o stems/
 ```
 
 ## Project Status
@@ -73,16 +89,19 @@ Audio --> Input --> Analysis --> Transcription --> Inference --> Processing --> 
 ## CLI Commands
 
 ### `transcribe`
-Convert audio to MIDI.
+Convert audio to MIDI. Supports local files and YouTube URLs.
 
 ```bash
 python -m src.cli transcribe input.wav [options]
+python -m src.cli transcribe "https://youtube.com/watch?v=..." -o output.mid
 
 Options:
   -o, --output PATH      Output MIDI file (default: input.mid)
   -t, --tempo FLOAT      Override tempo (BPM), 0 = auto-detect
-  -p, --polyphonic       Use polyphonic mode for chords
-  -q, --quantize         Quantize notes to grid (default: on)
+  -p, --polyphonic       Use polyphonic mode for chords/multiple notes
+  -q, --quantize         Quantize notes to tempo grid (default: on)
+  -a, --aggressive       Aggressive cleanup (remove harmonics, outliers)
+  --sensitivity TEXT     Transcription sensitivity: low/medium/high/ultra
   -v, --verbose          Show detailed output
 ```
 
@@ -91,27 +110,30 @@ Full harmony analysis with key, chord, and structure detection.
 
 ```bash
 python -m src.cli analyze input.wav [options]
-python -m src.cli analyze --url "https://youtube.com/..."
+python -m src.cli analyze "https://youtube.com/watch?v=..." [options]
 
 Options:
-  -u, --url TEXT         Download from URL instead of file
   -p, --polyphonic       Use polyphonic mode (default: on)
-  -k, --keep             Keep downloaded audio file
+  -k, --keep             Keep downloaded audio file (for URLs)
+  -v, --verbose          Show detailed output
 ```
 
 ### `separate`
-Multi-instrument transcription using source separation.
+Separate audio into individual instrument stems (audio files only, no transcription).
 
 ```bash
 python -m src.cli separate input.wav [options]
+python -m src.cli separate "https://youtube.com/watch?v=..." -o stems/
 
 Options:
-  -o, --output PATH      Output directory for stems
-  -s, --stems TEXT       Comma-separated stems (drums,bass,vocals,guitar,piano,other)
-  -m, --model TEXT       htdemucs (4-stem) or htdemucs_6s (6-stem)
-  --transcribe           Transcribe each stem to MIDI (default: on)
-  --save-stems           Save separated audio files (default: on)
-  --skip-drums           Skip drum transcription
+  -o, --output PATH      Output directory for stem WAV files
+  -s, --stems TEXT       Comma-separated stems to extract (drums,bass,vocals,guitar,piano,other)
+  -m, --model TEXT       htdemucs (4-stem) or htdemucs_6s (6-stem, includes guitar/piano)
+  -k, --keep             Keep downloaded audio file (for URLs)
+  --no-cache             Disable stem caching
+  -v, --verbose          Show detailed output
+
+Note: This command ONLY separates audio. Use 'transcribe' on output stems to generate MIDI.
 ```
 
 ### `info`
@@ -124,7 +146,7 @@ python -m src.cli info input.wav
 ## Requirements
 
 - Python 3.9+
-- FFmpeg (recommended for MP3/MP4 support and yt-dlp conversion)
+- FFmpeg (included via `imageio-ffmpeg` package for YouTube downloads and audio conversion)
 - GPU recommended for neural transcription and Demucs separation
 
 ### Core Dependencies
